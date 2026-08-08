@@ -16,10 +16,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import music.ai.recommend.MusicViewModel
+import music.ai.recommend.R
 
 @Composable
 fun SettingsScreen(viewModel: MusicViewModel) {
@@ -41,13 +43,18 @@ fun SettingsScreen(viewModel: MusicViewModel) {
     ) {
         item {
             Text(
-                text = "Library",
+                text = stringResource(id = R.string.library),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                )
+            ) {
                 Row(
                     modifier = Modifier
                         .padding(16.dp)
@@ -57,17 +64,17 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                 ) {
                     Column {
                         Text(
-                            text = "Refresh Media Library",
+                            text = stringResource(id = R.string.refresh_library),
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        Text("Scan device for new music", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                        Text(stringResource(id = R.string.scan_device_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
                     }
                     if (isScanning) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } else {
                         IconButton(onClick = { viewModel.loadMusic() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            Icon(Icons.Default.Refresh, contentDescription = stringResource(id = R.string.refresh_library))
                         }
                     }
                 }
@@ -77,13 +84,18 @@ fun SettingsScreen(viewModel: MusicViewModel) {
         item {
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "Appearance",
+                text = stringResource(id = R.string.appearance),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                )
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -92,12 +104,12 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Background Image",
+                                text = stringResource(id = R.string.background_image),
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = if (backgroundImageUri != null) "Custom background active" else "Default background",
+                                text = if (backgroundImageUri != null) stringResource(id = R.string.custom_background_active) else stringResource(id = R.string.default_background),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -105,13 +117,13 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                         Row {
                             if (backgroundImageUri != null) {
                                 IconButton(onClick = { viewModel.setBackgroundImage(null) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Remove Background")
+                                    Icon(Icons.Default.Delete, contentDescription = stringResource(id = R.string.delete))
                                 }
                             }
                             IconButton(onClick = {
                                 launcher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                             }) {
-                                Icon(Icons.Default.Image, contentDescription = "Choose Background")
+                                Icon(Icons.Default.Image, contentDescription = stringResource(id = R.string.background_image))
                             }
                         }
                     }
@@ -119,7 +131,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                     if (backgroundImageUri != null) {
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = "Transparency",
+                            text = stringResource(id = R.string.transparency),
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -137,13 +149,18 @@ fun SettingsScreen(viewModel: MusicViewModel) {
         item {
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "AI Music Analysis",
+                text = stringResource(id = R.string.ai_analysis),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                )
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     val isAiScanning by viewModel.isAiScanning.collectAsState()
                     val aiScanProgress by viewModel.aiScanProgress.collectAsState()
@@ -151,7 +168,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                     val scannedSongIds by viewModel.scannedSongIds.collectAsState()
 
                     Text(
-                        text = "Analyzed songs: ${scannedSongIds.size}",
+                        text = stringResource(id = R.string.analyzed_songs, scannedSongIds.size),
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -173,11 +190,11 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             onClick = { viewModel.stopAiScan() },
                             modifier = Modifier.align(Alignment.End)
                         ) {
-                            Text("Stop AI Scan")
+                            Text(stringResource(id = R.string.stop_ai_scan))
                         }
                     } else {
                         Text(
-                            text = if (aiScanStatus.isNotEmpty()) aiScanStatus else "Analyze your library for AI recommendations",
+                            text = if (aiScanStatus.isNotEmpty()) aiScanStatus else stringResource(id = R.string.ai_scan_hint),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -186,7 +203,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             onClick = { viewModel.startAiScan() },
                             modifier = Modifier.align(Alignment.End)
                         ) {
-                            Text("Start AI Scan")
+                            Text(stringResource(id = R.string.start_ai_scan))
                         }
                     }
                 }
@@ -196,7 +213,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
         item {
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "Equalizer",
+                text = stringResource(id = R.string.equalizer),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -221,10 +238,15 @@ fun EqualizerControl(viewModel: MusicViewModel) {
     var newPresetName by remember { mutableStateOf("") }
 
     if (eqBands.isEmpty()) {
-        Text("Equalizer not available", style = MaterialTheme.typography.bodySmall)
+        Text(stringResource(id = R.string.eq_not_available), style = MaterialTheme.typography.bodySmall)
     } else {
         Column {
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                )
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(
                         modifier = Modifier
@@ -266,12 +288,12 @@ fun EqualizerControl(viewModel: MusicViewModel) {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Button(onClick = { viewModel.resetEqualizer() }) {
-                            Text("Reset")
+                            Text(stringResource(id = R.string.reset))
                         }
                         Button(onClick = { showSavePresetDialog = true }) {
                             Icon(Icons.Default.Save, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Save Preset")
+                            Text(stringResource(id = R.string.save_preset))
                         }
                     }
                 }
@@ -279,7 +301,7 @@ fun EqualizerControl(viewModel: MusicViewModel) {
 
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Presets",
+                text = stringResource(id = R.string.presets),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -297,7 +319,7 @@ fun EqualizerControl(viewModel: MusicViewModel) {
                         trailingIcon = {
                             Icon(
                                 Icons.Default.Close,
-                                contentDescription = "Delete",
+                                contentDescription = stringResource(id = R.string.delete),
                                 modifier = Modifier
                                     .size(16.dp)
                                     .clickable { viewModel.deleteEqPreset(preset) }
@@ -311,12 +333,12 @@ fun EqualizerControl(viewModel: MusicViewModel) {
         if (showSavePresetDialog) {
             AlertDialog(
                 onDismissRequest = { showSavePresetDialog = false },
-                title = { Text("Save Preset") },
+                title = { Text(stringResource(id = R.string.save_preset)) },
                 text = {
                     OutlinedTextField(
                         value = newPresetName,
                         onValueChange = { newPresetName = it },
-                        label = { Text("Preset Name") },
+                        label = { Text(stringResource(id = R.string.preset_name)) },
                         singleLine = true
                     )
                 },
@@ -328,12 +350,12 @@ fun EqualizerControl(viewModel: MusicViewModel) {
                             newPresetName = ""
                         }
                     }) {
-                        Text("Save")
+                        Text(stringResource(id = R.string.save))
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = { showSavePresetDialog = false }) {
-                        Text("Cancel")
+                        Text(stringResource(id = R.string.cancel))
                     }
                 }
             )

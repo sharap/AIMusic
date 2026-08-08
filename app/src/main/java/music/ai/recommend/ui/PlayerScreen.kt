@@ -11,6 +11,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,12 +19,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.Player
+import android.content.ContentUris
+import android.net.Uri
+import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.Playlist
+import music.ai.recommend.R
 import music.ai.recommend.model.Song
 
 @Composable
@@ -41,28 +48,50 @@ fun PlayerScreen(
     val shuffleModeEnabled by viewModel.shuffleModeEnabled.collectAsState()
     val repeatMode by viewModel.repeatMode.collectAsState()
     val audioSessionId by viewModel.audioSessionId.collectAsState()
+    val aiShuffleEnabled by viewModel.aiShuffleEnabled.collectAsState()
+    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
+    val sleepTimerRemaining by viewModel.sleepTimerRemaining.collectAsState()
 
-    if (currentSong == null) {
-        onClose()
+    val song = currentSong ?: run {
+        LaunchedEffect(Unit) { onClose() }
         return
     }
 
     val pagerState = rememberPagerState(pageCount = { 2 })
+    var showSleepTimerDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Transparent) // Ensure transparency
+            .background(androidx.compose.ui.graphics.Color.Transparent) 
             .padding(top = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        IconButton(
-            onClick = onClose,
-            modifier = Modifier
-                .align(Alignment.Start)
-                .padding(start = 24.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(imageVector = Icons.Default.KeyboardArrowDown, contentDescription = "Close")
+            IconButton(onClick = onClose) {
+                Icon(imageVector = Icons.Default.KeyboardArrowDown, contentDescription = "Close")
+            }
+            
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (sleepTimerRemaining != null) {
+                    Text(
+                        text = formatTime(sleepTimerRemaining!!),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(onClick = { showSleepTimerDialog = true }) {
+                    Icon(
+                        imageVector = Icons.Default.Timer,
+                        contentDescription = "Sleep Timer",
+                        tint = if (sleepTimerRemaining != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
         }
 
         HorizontalPager(
@@ -71,7 +100,7 @@ fun PlayerScreen(
         ) { page ->
             if (page == 0) {
                 PlayerMainContent(
-                    currentSong = currentSong!!,
+                    currentSong = song,
                     isPlaying = isPlaying,
                     currentPosition = currentPosition,
                     duration = duration,
@@ -79,21 +108,25 @@ fun PlayerScreen(
                     repeatMode = repeatMode,
                     audioSessionId = audioSessionId,
                     scannedIds = scannedIds,
+                    aiShuffleEnabled = aiShuffleEnabled,
+                    isFavorite = song.id in favoriteIds,
+                    onToggleFavorite = { viewModel.toggleFavorite(song.id) },
                     onSeek = { viewModel.seekTo(it) },
                     onToggleShuffle = { viewModel.toggleShuffle() },
+                    onToggleAiShuffle = { viewModel.toggleAiShuffle() },
                     onNextRepeatMode = { viewModel.nextRepeatMode() },
                     onPrevious = { viewModel.previous() },
                     onNext = { viewModel.next() },
                     onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() },
-                    onPlaySimilar = { viewModel.playSimilar(currentSong!!) }
+                    onPlaySimilar = { viewModel.playSimilar(song) }
                 )
             } else {
                 QueueList(
                     queue = queue,
                     playlists = playlists,
                     scannedIds = scannedIds,
-                    currentSong = currentSong,
-                    onSongClick = { song -> viewModel.playSong(song, queue) },
+                    currentSong = song,
+                    onSongClick = { s -> viewModel.playSong(s, queue) },
                     onRemove = { index -> viewModel.removeFromQueue(index) },
                     onMove = { from, to -> viewModel.moveQueueItem(from, to) },
                     onSaveNew = { name -> viewModel.createPlaylistWithSongs(name, queue) },
@@ -122,6 +155,15 @@ fun PlayerScreen(
                 )
             }
         }
+
+        if (showSleepTimerDialog) {
+            SleepTimerDialog(
+                currentRemaining = sleepTimerRemaining,
+                onStart = { viewModel.startSleepTimer(it) },
+                onStop = { viewModel.stopSleepTimer() },
+                onDismiss = { showSleepTimerDialog = false }
+            )
+        }
     }
 }
 
@@ -135,8 +177,12 @@ fun PlayerMainContent(
     repeatMode: Int,
     audioSessionId: Int?,
     scannedIds: Set<Long>,
+    aiShuffleEnabled: Boolean,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleShuffle: () -> Unit,
+    onToggleAiShuffle: () -> Unit,
     onNextRepeatMode: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -153,11 +199,26 @@ fun PlayerMainContent(
         Spacer(modifier = Modifier.weight(1f))
 
         Box(contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Default.MusicNote,
+            val albumArtUri = ContentUris.withAppendedId(
+                Uri.parse("content://media/external/audio/albumart"),
+                currentSong.albumId
+            )
+            SubcomposeAsyncImage(
+                model = albumArtUri,
                 contentDescription = null,
-                modifier = Modifier.size(240.dp),
-                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                modifier = Modifier
+                    .size(240.dp)
+                    .clip(MaterialTheme.shapes.large)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                error = {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = null,
+                        modifier = Modifier.size(120.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    )
+                }
             )
             BarVisualizer(
                 audioSessionId = audioSessionId,
@@ -215,8 +276,16 @@ fun PlayerMainContent(
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(24.dp)
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            IconButton(onClick = onToggleAiShuffle) {
+                Icon(
+                    imageVector = Icons.Default.AutoMode,
+                    contentDescription = "AI Shuffle",
+                    tint = if (aiShuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
             IconButton(onClick = onPrevious) {
                 Icon(imageVector = Icons.Default.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(48.dp))
             }
@@ -232,6 +301,14 @@ fun PlayerMainContent(
             }
             IconButton(onClick = onNext) {
                 Icon(imageVector = Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(48.dp))
+            }
+            IconButton(onClick = onToggleFavorite) {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = "Favorite",
+                    tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(32.dp)
+                )
             }
         }
 
@@ -249,6 +326,7 @@ fun PlayerMainContent(
                     tint = if (shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
             IconButton(onClick = onNextRepeatMode) {
                 val icon = when (repeatMode) {
                     Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne
@@ -280,6 +358,57 @@ fun PlayerMainContent(
 }
 
 @Composable
+fun SleepTimerDialog(
+    currentRemaining: Long?,
+    onStart: (Int) -> Unit,
+    onStop: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(id = R.string.sleep_timer)) },
+        text = {
+            Column {
+                if (currentRemaining != null) {
+                    Text(
+                        text = stringResource(id = R.string.timer_active, formatTime(currentRemaining)),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                
+                val options = listOf(15, 30, 45, 60)
+                options.forEach { mins ->
+                    ListItem(
+                        headlineContent = { Text(stringResource(id = R.string.minutes, mins)) },
+                        modifier = Modifier.clickable {
+                            onStart(mins)
+                            onDismiss()
+                        }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (currentRemaining != null) {
+                TextButton(onClick = {
+                    onStop()
+                    onDismiss()
+                }) {
+                    Text(stringResource(id = R.string.stop_timer), color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(id = R.string.cancel))
+            }
+        }
+    )
+}
+
+@Composable
 fun QueueList(
     queue: List<Song>,
     playlists: List<Playlist>,
@@ -295,7 +424,7 @@ fun QueueList(
     val listState = rememberLazyListState()
     var showSaveDialog by remember { mutableStateOf(false) }
     var playlistName by remember { mutableStateOf("") }
-    var saveMode by remember { mutableStateOf("new") } // "new", "add", "overwrite"
+    var saveMode by remember { mutableStateOf("new") } 
 
     LaunchedEffect(currentSong) {
         val index = queue.indexOfFirst { it.id == currentSong?.id }
@@ -315,7 +444,7 @@ fun QueueList(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "Playback Queue",
+                text = stringResource(id = R.string.playback_queue),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(vertical = 16.dp)
@@ -323,28 +452,28 @@ fun QueueList(
             TextButton(onClick = { showSaveDialog = true }) {
                 Icon(Icons.Default.Save, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Save Queue")
+                Text(stringResource(id = R.string.save_queue))
             }
         }
 
         if (showSaveDialog) {
             AlertDialog(
                 onDismissRequest = { showSaveDialog = false },
-                title = { Text("Save Queue as Playlist") },
+                title = { Text(stringResource(id = R.string.save_queue_title)) },
                 text = {
                     Column {
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { saveMode = "new" }) {
                                 RadioButton(selected = saveMode == "new", onClick = { saveMode = "new" })
-                                Text("New Playlist")
+                                Text(stringResource(id = R.string.new_playlist))
                             }
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { saveMode = "add" }) {
                                 RadioButton(selected = saveMode == "add", onClick = { saveMode = "add" })
-                                Text("Add to Existing")
+                                Text(stringResource(id = R.string.add_to_existing))
                             }
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { saveMode = "overwrite" }) {
                                 RadioButton(selected = saveMode == "overwrite", onClick = { saveMode = "overwrite" })
-                                Text("Overwrite Existing")
+                                Text(stringResource(id = R.string.overwrite_existing))
                             }
                         }
                         
@@ -354,7 +483,7 @@ fun QueueList(
                             OutlinedTextField(
                                 value = playlistName,
                                 onValueChange = { playlistName = it },
-                                label = { Text("Playlist Name") },
+                                label = { Text(stringResource(id = R.string.playlist_name)) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -386,13 +515,13 @@ fun QueueList(
                                 playlistName = ""
                             }
                         }) {
-                            Text("Save")
+                            Text(stringResource(id = R.string.save))
                         }
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = { showSaveDialog = false }) {
-                        Text("Cancel")
+                        Text(stringResource(id = R.string.cancel))
                     }
                 }
             )
@@ -417,11 +546,26 @@ fun QueueList(
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (isCurrent) Icons.Default.PlayArrow else Icons.Default.MusicNote,
+                    val albumArtUri = ContentUris.withAppendedId(
+                        Uri.parse("content://media/external/audio/albumart"),
+                        song.albumId
+                    )
+                    SubcomposeAsyncImage(
+                        model = albumArtUri,
                         contentDescription = null,
-                        tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        error = {
+                            Icon(
+                                imageVector = if (isCurrent) Icons.Default.PlayArrow else Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(4.dp)
+                            )
+                        }
                     )
                     Spacer(modifier = Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {

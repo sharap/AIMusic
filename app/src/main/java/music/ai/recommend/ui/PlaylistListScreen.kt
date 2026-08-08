@@ -1,5 +1,6 @@
 package music.ai.recommend.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,19 +14,29 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import android.content.ContentUris
+import android.net.Uri
+import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.Playlist
+import music.ai.recommend.R
 
 @Composable
-fun PlaylistListScreen(viewModel: MusicViewModel) {
+fun PlaylistListScreen(
+    viewModel: MusicViewModel,
+    onPlaylistClick: (String) -> Unit
+) {
     val playlists by viewModel.playlists.collectAsState()
     val scannedIds by viewModel.scannedSongIds.collectAsState()
 
     if (playlists.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
-                text = "No playlists saved yet.",
+                text = stringResource(id = R.string.no_playlists_yet),
                 color = MaterialTheme.colorScheme.onSurface
             )
         }
@@ -39,7 +50,7 @@ fun PlaylistListScreen(viewModel: MusicViewModel) {
                 PlaylistItem(
                     playlist = playlist,
                     scannedCount = scannedCount,
-                    onClick = { viewModel.playSong(playlist.songs.first(), playlist.songs) },
+                    onClick = { onPlaylistClick(playlist.name) },
                     onDelete = { viewModel.deletePlaylist(playlist) }
                 )
             }
@@ -56,12 +67,38 @@ fun PlaylistItem(playlist: Playlist, scannedCount: Int, onClick: () -> Unit, onD
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(40.dp)
-        )
+        val firstSong = playlist.songs.firstOrNull()
+        if (firstSong != null) {
+            val albumArtUri = ContentUris.withAppendedId(
+                Uri.parse("content://media/external/audio/albumart"),
+                firstSong.albumId
+            )
+            SubcomposeAsyncImage(
+                model = albumArtUri,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                error = {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+            )
+        } else {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(48.dp)
+            )
+        }
+        
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -71,7 +108,7 @@ fun PlaylistItem(playlist: Playlist, scannedCount: Int, onClick: () -> Unit, onD
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "${playlist.songs.size} songs",
+                    text = stringResource(id = R.string.songs_count, playlist.songs.size),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface
                 )
@@ -92,7 +129,7 @@ fun PlaylistItem(playlist: Playlist, scannedCount: Int, onClick: () -> Unit, onD
             }
         }
         IconButton(onClick = onDelete) {
-            Icon(Icons.Default.Delete, contentDescription = "Delete")
+            Icon(Icons.Default.Delete, contentDescription = stringResource(id = R.string.delete))
         }
     }
 }

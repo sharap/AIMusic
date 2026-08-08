@@ -15,6 +15,7 @@ class MusicScanner {
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.ALBUM,
+            MediaStore.Audio.Media.ALBUM_ID,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATA
         )
@@ -35,6 +36,7 @@ class MusicScanner {
             val titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
             val artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
             val albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val albumIdColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
             val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
 
@@ -43,6 +45,7 @@ class MusicScanner {
                 val title = cursor.getString(titleColumn) ?: "Unknown"
                 val artist = cursor.getString(artistColumn) ?: "Unknown"
                 val album = cursor.getString(albumColumn) ?: "Unknown"
+                val albumId = cursor.getLong(albumIdColumn)
                 val duration = cursor.getLong(durationColumn)
                 val path = cursor.getString(dataColumn) ?: ""
                 val uri = ContentUris.withAppendedId(
@@ -58,6 +61,7 @@ class MusicScanner {
                         title = title,
                         artist = artist,
                         album = album,
+                        albumId = albumId,
                         duration = duration,
                         uri = uri,
                         path = path,

@@ -11,10 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
@@ -24,6 +21,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.*
@@ -44,20 +43,16 @@ class MainActivity : ComponentActivity() {
         setContent {
             AiMusicTheme {
                 val viewModel: MusicViewModel = viewModel()
+                val folders by viewModel.folders.collectAsState()
+                val playlists by viewModel.playlists.collectAsState()
                 val backgroundImageUri by viewModel.backgroundImageUri.collectAsState()
                 val backgroundAlpha by viewModel.backgroundAlpha.collectAsState()
                 
-                val navController = rememberNavController()
+                val folderNavController = rememberNavController()
+                val playlistNavController = rememberNavController()
                 var showPlayer by remember { mutableStateOf(false) }
                 val pagerState = rememberPagerState(initialPage = 1, pageCount = { 3 })
                 val scope = rememberCoroutineScope()
-
-                LaunchedEffect(openPlayerAction) {
-                    if (openPlayerAction) {
-                        showPlayer = true
-                        openPlayerAction = false
-                    }
-                }
 
                 val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     arrayOf(
@@ -72,130 +67,183 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                var permissionsGranted by remember {
+                    mutableStateOf(
+                        permissions.all {
+                            checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+                        }
+                    )
+                }
+
                 val launcher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { results ->
-                    if (results.values.all { it }) {
+                    permissionsGranted = results.values.all { it }
+                    if (permissionsGranted) {
                         viewModel.loadMusic()
                     }
                 }
 
-                LaunchedEffect(Unit) {
-                    val allGranted = permissions.all {
-                        checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+                LaunchedEffect(openPlayerAction) {
+                    if (openPlayerAction) {
+                        showPlayer = true
+                        openPlayerAction = false
                     }
-                    if (allGranted) {
+                }
+
+                LaunchedEffect(permissionsGranted) {
+                    if (permissionsGranted) {
                         viewModel.loadMusic()
-                    } else {
+                    }
+                }
+
+                if (!permissionsGranted) {
+                    StartScreen(onGrantPermissions = {
                         launcher.launch(permissions)
+                    })
+
+                    DisposableEffect(Unit) {
+                        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                permissionsGranted = permissions.all {
+                                    checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+                                }
+                            }
+                        }
+                        lifecycle.addObserver(observer)
+                        onDispose { lifecycle.removeObserver(observer) }
                     }
-                }
-
-                Box(modifier = Modifier.fillMaxSize()) {
-                    // Base background color (light or dark)
-                    Surface(
-                        modifier = Modifier.fillMaxSize(),
-                        color = MaterialTheme.colorScheme.background
-                    ) {}
-
-                    if (backgroundImageUri != null) {
-                        AsyncImage(
-                            model = backgroundImageUri,
-                            contentDescription = null,
+                } else {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        Surface(
                             modifier = Modifier.fillMaxSize(),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                            alpha = backgroundAlpha
-                        )
-                    }
+                            color = MaterialTheme.colorScheme.background
+                        ) {}
 
-                    Scaffold(
-                        modifier = Modifier.fillMaxSize(),
-                        containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        bottomBar = {
-                            Column {
-                                PlayerOverlay(
-                                    viewModel = viewModel,
-                                    onClick = { showPlayer = true }
-                                )
-                                NavigationBar(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = backgroundAlpha.coerceAtLeast(0.4f))
-                                ) {
-                                    NavigationBarItem(
-                                        icon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null) },
-                                        label = { Text("Playlists") },
-                                        selected = pagerState.currentPage == 0,
-                                        onClick = { scope.launch { pagerState.animateScrollToPage(0) } }
-                                    )
-                                    NavigationBarItem(
-                                        icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
-                                        label = { Text("Music") },
-                                        selected = pagerState.currentPage == 1,
-                                        onClick = { scope.launch { pagerState.animateScrollToPage(1) } }
-                                    )
-                                    NavigationBarItem(
-                                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                                        label = { Text("Settings") },
-                                        selected = pagerState.currentPage == 2,
-                                        onClick = { scope.launch { pagerState.animateScrollToPage(2) } }
-                                    )
-                                }
-                            }
-                        }
-                    ) { innerPadding ->
-                        Box(modifier = Modifier.padding(innerPadding)) {
-                            HorizontalPager(
-                                state = pagerState,
-                                modifier = Modifier.fillMaxSize()
-                            ) { page ->
-                                when (page) {
-                                    0 -> PlaylistListScreen(viewModel = viewModel)
-                                    1 -> NavHost(navController = navController, startDestination = "folder_list") {
-                                        composable("folder_list") {
-                                            FolderListScreen(
-                                                viewModel = viewModel,
-                                                onFolderClick = { folderName ->
-                                                    navController.navigate("song_list/$folderName")
-                                                }
-                                            )
-                                        }
-                                        composable(
-                                            "song_list/{folderName}",
-                                            arguments = listOf(navArgument("folderName") { type = NavType.StringType })
-                                        ) { backStackEntry ->
-                                            val folderName = backStackEntry.arguments?.getString("folderName") ?: ""
-                                            SongListScreen(
-                                                viewModel = viewModel,
-                                                folderName = folderName
-                                            )
-                                        }
-                                    }
-                                    2 -> SettingsScreen(viewModel = viewModel)
-                                }
-                            }
+                        if (backgroundImageUri != null) {
+                            AsyncImage(
+                                model = backgroundImageUri,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                alpha = backgroundAlpha
+                            )
                         }
 
-                        if (showPlayer) {
-                            ModalBottomSheet(
-                                onDismissRequest = { showPlayer = false },
-                                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                                containerColor = MaterialTheme.colorScheme.background,
-                                scrimColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f),
-                                dragHandle = null // Optional: remove drag handle for cleaner look
-                            ) {
-                                Box(modifier = Modifier.fillMaxSize()) {
-                                    if (backgroundImageUri != null) {
-                                        AsyncImage(
-                                            model = backgroundImageUri,
-                                            contentDescription = null,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                                            alpha = backgroundAlpha
+                        Scaffold(
+                            modifier = Modifier.fillMaxSize(),
+                            containerColor = Color.Transparent,
+                            bottomBar = {
+                                Column {
+                                    PlayerOverlay(
+                                        viewModel = viewModel,
+                                        onClick = { showPlayer = true }
+                                    )
+                                    NavigationBar(
+                                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = backgroundAlpha.coerceAtLeast(0.4f))
+                                    ) {
+                                        NavigationBarItem(
+                                            icon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null) },
+                                            label = { Text(androidx.compose.ui.res.stringResource(id = R.string.nav_playlists)) },
+                                            selected = pagerState.currentPage == 0,
+                                            onClick = { scope.launch { pagerState.animateScrollToPage(0) } }
+                                        )
+                                        NavigationBarItem(
+                                            icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
+                                            label = { Text(androidx.compose.ui.res.stringResource(id = R.string.nav_music)) },
+                                            selected = pagerState.currentPage == 1,
+                                            onClick = { scope.launch { pagerState.animateScrollToPage(1) } }
+                                        )
+                                        NavigationBarItem(
+                                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                            label = { Text(androidx.compose.ui.res.stringResource(id = R.string.nav_settings)) },
+                                            selected = pagerState.currentPage == 2,
+                                            onClick = { scope.launch { pagerState.animateScrollToPage(2) } }
                                         )
                                     }
-                                    PlayerScreen(
-                                        viewModel = viewModel,
-                                        onClose = { showPlayer = false }
-                                    )
+                                }
+                            }
+                        ) { innerPadding ->
+                            Box(modifier = Modifier.padding(innerPadding)) {
+                                HorizontalPager(
+                                    state = pagerState,
+                                    modifier = Modifier.fillMaxSize()
+                                ) { page ->
+                                    when (page) {
+                                        0 -> NavHost(navController = playlistNavController, startDestination = "playlist_list") {
+                                            composable("playlist_list") {
+                                                PlaylistListScreen(
+                                                    viewModel = viewModel,
+                                                    onPlaylistClick = { playlistName ->
+                                                        playlistNavController.navigate("song_list_playlist/$playlistName")
+                                                    }
+                                                )
+                                            }
+                                            composable(
+                                                "song_list_playlist/{playlistName}",
+                                                arguments = listOf(navArgument("playlistName") { type = NavType.StringType })
+                                            ) { backStackEntry ->
+                                                val name = backStackEntry.arguments?.getString("playlistName") ?: ""
+                                                val playlist = playlists.find { it.name == name }
+                                                SongListScreen(
+                                                    viewModel = viewModel,
+                                                    title = name,
+                                                    songs = playlist?.songs ?: emptyList(),
+                                                    onBack = { playlistNavController.popBackStack() }
+                                                )
+                                            }
+                                        }
+                                        1 -> NavHost(navController = folderNavController, startDestination = "folder_list") {
+                                            composable("folder_list") {
+                                                FolderListScreen(
+                                                    viewModel = viewModel,
+                                                    onFolderClick = { folderName ->
+                                                        folderNavController.navigate("song_list_folder/$folderName")
+                                                    }
+                                                )
+                                            }
+                                            composable(
+                                                "song_list_folder/{folderName}",
+                                                arguments = listOf(navArgument("folderName") { type = NavType.StringType })
+                                            ) { backStackEntry ->
+                                                val name = backStackEntry.arguments?.getString("folderName") ?: ""
+                                                val folder = folders.find { it.name == name }
+                                                SongListScreen(
+                                                    viewModel = viewModel,
+                                                    title = name,
+                                                    songs = folder?.songs ?: emptyList(),
+                                                    onBack = { folderNavController.popBackStack() }
+                                                )
+                                            }
+                                        }
+                                        2 -> SettingsScreen(viewModel = viewModel)
+                                    }
+                                }
+                            }
+
+                            if (showPlayer) {
+                                ModalBottomSheet(
+                                    onDismissRequest = { showPlayer = false },
+                                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                                    containerColor = MaterialTheme.colorScheme.background,
+                                    scrimColor = Color.Black.copy(alpha = 0.5f),
+                                    dragHandle = null
+                                ) {
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        if (backgroundImageUri != null) {
+                                            AsyncImage(
+                                                model = backgroundImageUri,
+                                                contentDescription = null,
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                                alpha = backgroundAlpha
+                                            )
+                                        }
+                                        PlayerScreen(
+                                            viewModel = viewModel,
+                                            onClose = { showPlayer = false }
+                                        )
+                                    }
                                 }
                             }
                         }

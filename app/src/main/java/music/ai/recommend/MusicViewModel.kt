@@ -31,9 +31,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import music.ai.recommend.ai.AiScanner
+import music.ai.recommend.ai.ClapTextEncoder
 import music.ai.recommend.model.Folder
 import music.ai.recommend.model.Song
 import music.ai.recommend.scanner.MusicScanner
+import music.ai.recommend.R
 import java.lang.reflect.Type
 
 class UriAdapter : JsonSerializer<Uri>, JsonDeserializer<Uri> {
@@ -49,11 +51,13 @@ class UriAdapter : JsonSerializer<Uri>, JsonDeserializer<Uri> {
 data class Playlist(val name: String, val songs: List<Song>)
 data class EqBand(val index: Int, val freq: Int, val level: Int)
 data class EqPreset(val name: String, val levels: List<Int>)
+data class ScoredSong(val song: Song, val score: Float)
 
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val scanner = MusicScanner()
     private val aiScanner by lazy { AiScanner(application) }
+    private val textEncoder by lazy { ClapTextEncoder(application) }
     private val gson = GsonBuilder()
         .registerTypeAdapter(Uri::class.java, UriAdapter())
         .create()
@@ -67,6 +71,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
+
+    private val _favoriteSongIds = MutableStateFlow<Set<Long>>(emptySet())
+    val favoriteSongIds: StateFlow<Set<Long>> = _favoriteSongIds.asStateFlow()
 
     private val _backgroundImageUri = MutableStateFlow<String?>(null)
     val backgroundImageUri: StateFlow<String?> = _backgroundImageUri.asStateFlow()
@@ -98,6 +105,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _scannedSongIds = MutableStateFlow<Set<Long>>(emptySet())
     val scannedSongIds: StateFlow<Set<Long>> = _scannedSongIds.asStateFlow()
 
+    private val _aiSearchResults = MutableStateFlow<List<ScoredSong>?>(null)
+    val aiSearchResults: StateFlow<List<ScoredSong>?> = _aiSearchResults.asStateFlow()
+
+    private val _regularSearchResults = MutableStateFlow<List<Song>?>(null)
+    val regularSearchResults: StateFlow<List<Song>?> = _regularSearchResults.asStateFlow()
+
     private val _currentSong = MutableStateFlow<Song?>(null)
     val currentSong: StateFlow<Song?> = _currentSong.asStateFlow()
 
@@ -113,6 +126,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _shuffleModeEnabled = MutableStateFlow(false)
     val shuffleModeEnabled: StateFlow<Boolean> = _shuffleModeEnabled.asStateFlow()
 
+    private val _aiShuffleEnabled = MutableStateFlow(false)
+    val aiShuffleEnabled: StateFlow<Boolean> = _aiShuffleEnabled.asStateFlow()
+
     private val _repeatMode = MutableStateFlow(Player.REPEAT_MODE_OFF)
     val repeatMode: StateFlow<Int> = _repeatMode.asStateFlow()
 
@@ -122,12 +138,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _queue = MutableStateFlow<List<Song>>(emptyList())
     val queue: StateFlow<List<Song>> = _queue.asStateFlow()
 
+    private val _sleepTimerRemaining = MutableStateFlow<Long?>(null) // ms
+    val sleepTimerRemaining: StateFlow<Long?> = _sleepTimerRemaining.asStateFlow()
+
     private var progressJob: Job? = null
     private var aiScanJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var playlistSongs: List<Song> = emptyList()
     private var allSongs: List<Song> = emptyList()
 
     init {
+        loadFavorites()
         loadPlaylists()
         loadEqPresets()
         refreshScannedIds()
@@ -179,9 +200,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     val mediaId = mediaItem?.mediaId?.toLongOrNull()
-                    _currentSong.value = playlistSongs.find { it.id == mediaId } ?: allSongs.find { it.id == mediaId }
+                    val song = playlistSongs.find { it.id == mediaId } ?: allSongs.find { it.id == mediaId }
+                    _currentSong.value = song
                     _duration.value = c.duration
                     saveCurrentQueue()
+                    
+                    Log.d("MusicViewModel", "Transition to ${song?.title}, reason: $reason, aiShuffle: ${_aiShuffleEnabled.value}")
+                    if (_aiShuffleEnabled.value && song != null) {
+                        applySmartShuffle(song)
+                    }
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
@@ -211,8 +238,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val result = scanner.scanMusic(getApplication())
-                _folders.value = result
                 allSongs = result.flatMap { it.songs }
+                
+                // Add virtual "All Tracks" folder
+                val allTracksFolder = Folder("All Tracks", allSongs)
+                _folders.value = listOf(allTracksFolder) + result
+                
+                viewModelScope.launch(Dispatchers.Main) {
+                    loadPlaylists() // Ensure Favorites virtual playlist is updated
+                }
                 
                 controller?.let {
                     viewModelScope.launch(Dispatchers.Main) {
@@ -283,6 +317,89 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleShuffle() {
         controller?.let {
             it.shuffleModeEnabled = !it.shuffleModeEnabled
+            if (it.shuffleModeEnabled) _aiShuffleEnabled.value = false
+        }
+    }
+
+    fun toggleAiShuffle() {
+        _aiShuffleEnabled.value = !_aiShuffleEnabled.value
+        Log.d("MusicViewModel", "AI Shuffle toggled: ${_aiShuffleEnabled.value}")
+        if (_aiShuffleEnabled.value) {
+            controller?.shuffleModeEnabled = false
+            _currentSong.value?.let { applySmartShuffle(it) }
+        }
+    }
+
+    private fun applySmartShuffle(currentSong: Song) {
+        val c = controller ?: return
+        val currentIndex = c.currentMediaItemIndex
+        val mediaItemCount = c.mediaItemCount
+        val upcomingIds = mutableListOf<Pair<Int, Long>>()
+        
+        for (i in (currentIndex + 1) until mediaItemCount) {
+            c.getMediaItemAt(i).mediaId.toLongOrNull()?.let { 
+                upcomingIds.add(i to it)
+            }
+        }
+
+        if (upcomingIds.isEmpty()) return
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val embeddings = aiScanner.getStoredEmbeddings()
+                val currentEmbedding = embeddings[currentSong.id]
+                
+                if (currentEmbedding == null) {
+                    Log.d("MusicViewModel", "Current song not scanned, skipping smart shuffle")
+                    return@launch
+                }
+                
+                val remainingItems = mutableListOf<Pair<Int, Float>>()
+                for ((originalIndex, mediaId) in upcomingIds) {
+                    val embedding = embeddings[mediaId]
+                    val similarity = if (embedding != null) {
+                        calculateCosineSimilarity(currentEmbedding, embedding)
+                    } else {
+                        -1f 
+                    }
+                    remainingItems.add(originalIndex to similarity)
+                }
+                
+                val sortedRemaining = remainingItems.sortedByDescending { it.second }
+                
+                withContext(Dispatchers.Main) {
+                    val topMatches = sortedRemaining.take(5)
+                    
+                    // Move the top 5 matches to the next positions (in reverse order to stack correctly)
+                    topMatches.asReversed().forEach { (originalIdx, score) ->
+                        val mediaIdToFind = upcomingIds.find { it.first == originalIdx }?.second?.toString() ?: return@forEach
+                        
+                        // Search for the current position of the item (it might have shifted)
+                        for (j in 0 until c.mediaItemCount) {
+                            if (c.getMediaItemAt(j).mediaId == mediaIdToFind) {
+                                val currentIdx = c.currentMediaItemIndex
+                                if (j > currentIdx && j != currentIdx + 1) {
+                                    val trackName = c.getMediaItemAt(j).mediaMetadata.title
+                                    Log.d("MusicViewModel", "Smart Shuffle: Moving '$trackName' (Score: $score) to next position")
+                                    c.moveMediaItem(j, currentIdx + 1)
+                                    
+                                    // Update local state to keep UI in sync
+                                    val q = _queue.value.toMutableList()
+                                    if (j < q.size && (currentIdx + 1) < q.size) {
+                                        val item = q.removeAt(j)
+                                        q.add(currentIdx + 1, item)
+                                        _queue.value = q
+                                        playlistSongs = q
+                                    }
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MusicViewModel", "Smart shuffle failed", e)
+            }
         }
     }
 
@@ -373,12 +490,46 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun loadFavorites() {
+        val json = prefs.getString("favorite_ids", null)
+        if (json != null) {
+            val type = object : TypeToken<Set<Long>>() {}.type
+            _favoriteSongIds.value = gson.fromJson(json, type)
+        }
+    }
+
+    fun toggleFavorite(songId: Long) {
+        val current = _favoriteSongIds.value.toMutableSet()
+        if (songId in current) {
+            current.remove(songId)
+        } else {
+            current.add(songId)
+        }
+        _favoriteSongIds.value = current
+        prefs.edit().putString("favorite_ids", gson.toJson(current)).apply()
+        
+        // Refresh virtual "Favorites" playlist
+        loadPlaylists() 
+    }
+
     private fun loadPlaylists() {
         val json = prefs.getString("playlists", null)
-        if (json != null) {
+        val savedPlaylists: List<Playlist> = if (json != null) {
             val type = object : TypeToken<List<Playlist>>() {}.type
-            _playlists.value = gson.fromJson(json, type)
+            gson.fromJson(json, type)
+        } else {
+            emptyList()
         }
+        
+        // Add virtual "Favorites" playlist
+        val favoriteSongs = allSongs.filter { it.id in _favoriteSongIds.value }
+        val finalPlaylists = if (favoriteSongs.isNotEmpty()) {
+            listOf(Playlist("Favorites", favoriteSongs)) + savedPlaylists
+        } else {
+            savedPlaylists
+        }
+        
+        _playlists.value = finalPlaylists
     }
 
     fun savePlaylist(name: String) {
@@ -466,6 +617,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         EqBand(i, freqs.getOrElse(i) { 0 }, levels.getOrElse(i) { 0 })
                     }
                     _eqBands.value = bands
+
+                    // Apply persisted EQ levels if they exist
+                    val savedJson = prefs.getString("current_eq_levels", null)
+                    if (savedJson != null) {
+                        val type = object : TypeToken<List<Int>>() {}.type
+                        val savedLevels: List<Int> = gson.fromJson(savedJson, type)
+                        savedLevels.forEachIndexed { index, level ->
+                            if (index < bands.size) {
+                                setEqBandLevel(index, level)
+                            }
+                        }
+                    }
                 }
             }, MoreExecutors.directExecutor())
         }
@@ -479,9 +642,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         controller?.sendCustomCommand(SessionCommand("SET_EQ_BAND", Bundle.EMPTY), args)
         
         // Update local state
-        _eqBands.value = _eqBands.value.map {
+        val updatedBands = _eqBands.value.map {
             if (it.index == band) it.copy(level = level) else it
         }
+        _eqBands.value = updatedBands
+        
+        // Persist current EQ state
+        val levels = updatedBands.map { it.level }
+        prefs.edit().putString("current_eq_levels", gson.toJson(levels)).apply()
     }
 
     fun resetEqualizer() {
@@ -572,10 +740,32 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         progressJob?.cancel()
     }
 
+    fun startSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        val durationMs = minutes * 60 * 1000L
+        _sleepTimerRemaining.value = durationMs
+        
+        sleepTimerJob = viewModelScope.launch {
+            var remaining = durationMs
+            while (remaining > 0) {
+                delay(1000)
+                remaining -= 1000
+                _sleepTimerRemaining.value = remaining
+            }
+            _sleepTimerRemaining.value = null
+            pause()
+        }
+    }
+
+    fun stopSleepTimer() {
+        sleepTimerJob?.cancel()
+        _sleepTimerRemaining.value = null
+    }
+
     fun startAiScan() {
         if (_isAiScanning.value) return
         if (allSongs.isEmpty()) {
-            _aiScanStatus.value = "No songs found to scan. Try refreshing library first."
+            _aiScanStatus.value = getApplication<Application>().getString(R.string.no_songs_to_scan)
             return
         }
         _isAiScanning.value = true
@@ -586,18 +776,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     if (etr < 0) {
                         _aiScanStatus.value = status
                     } else {
-                        _aiScanStatus.value = "Scanning: $status\n$index/${allSongs.size} songs processed. ETR: ${formatEtr(etr)}"
+                        val formattedProgress = getApplication<Application>().getString(
+                            R.string.scan_progress, index, allSongs.size, formatEtr(etr)
+                        )
+                        _aiScanStatus.value = "${getApplication<Application>().getString(R.string.scanning_track, status)}\n$formattedProgress"
                     }
                     if (index % 5 == 0) refreshScannedIds()
                 }
             } catch (e: Exception) {
                 Log.e("MusicViewModel", "AI Scan failed", e)
-                _aiScanStatus.value = "Scan Error: ${e.message}"
+                _aiScanStatus.value = getApplication<Application>().getString(R.string.ai_scan_error, e.message ?: "Unknown")
             } finally {
                 refreshScannedIds()
                 _isAiScanning.value = false
-                if (_aiScanStatus.value.startsWith("Scanning")) {
-                    _aiScanStatus.value = "Scan Complete"
+                if (_aiScanStatus.value.contains("Scanning") || _aiScanStatus.value.contains("Сканирование")) {
+                    _aiScanStatus.value = getApplication<Application>().getString(R.string.ai_scan_complete)
                 }
             }
         }
@@ -618,7 +811,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         aiScanner.stop()
         aiScanJob?.cancel()
         _isAiScanning.value = false
-        _aiScanStatus.value = "Scan Stopped"
+        _aiScanStatus.value = getApplication<Application>().getString(R.string.ai_scan_stopped)
         refreshScannedIds()
     }
 
@@ -628,7 +821,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val embeddings = aiScanner.getStoredEmbeddings()
                 val currentEmbedding = embeddings[song.id] ?: run {
                     withContext(Dispatchers.Main) {
-                        _aiScanStatus.value = "Current song not analyzed. Run AI Scan first."
+                        _aiScanStatus.value = getApplication<Application>().getString(R.string.song_not_analyzed)
                     }
                     return@launch
                 }
@@ -637,10 +830,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     .filter { it.id in embeddings.keys && it.id != song.id }
                     .map { otherSong ->
                         val otherEmbedding = embeddings[otherSong.id]!!
-                        val distance = calculateDistance(currentEmbedding, otherEmbedding)
-                        otherSong to distance
+                        val similarity = calculateCosineSimilarity(currentEmbedding, otherEmbedding)
+                        otherSong to similarity
                     }
-                    .sortedBy { it.second }
+                    .sortedByDescending { it.second }
                     .map { it.first }
                     .take(30)
                 
@@ -655,13 +848,64 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun calculateDistance(v1: List<Float>, v2: List<Float>): Float {
-        var sum = 0f
-        for (i in 0 until minOf(v1.size, v2.size)) {
-            val diff = v1[i] - v2[i]
-            sum += diff * diff
+    fun aiSearch(query: String) {
+        if (query.isBlank()) {
+            _aiSearchResults.value = null
+            _regularSearchResults.value = null
+            return
         }
-        return kotlin.math.sqrt(sum)
+        
+        // Regular Search
+        val regularResults = allSongs.filter { 
+            it.title.contains(query, ignoreCase = true) || it.artist.contains(query, ignoreCase = true)
+        }.take(20)
+        _regularSearchResults.value = regularResults
+
+        // AI Search
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val queryEmbedding = textEncoder.encode(query).toList()
+                val embeddings = aiScanner.getStoredEmbeddings()
+                
+                val results = allSongs
+                    .filter { it.id in embeddings.keys }
+                    .map { song ->
+                        val songEmbedding = embeddings[song.id]!!
+                        val similarity = calculateCosineSimilarity(queryEmbedding, songEmbedding)
+                        ScoredSong(song, mapSimilarityToDisplay(similarity))
+                    }
+                    .sortedByDescending { it.score }
+                    .filter { it.score > 0.1f } 
+                    .take(50)
+                
+                _aiSearchResults.value = results
+            } catch (e: Exception) {
+                Log.e("MusicViewModel", "AI Search failed", e)
+            }
+        }
+    }
+
+    private fun calculateCosineSimilarity(v1: List<Float>, v2: List<Float>): Float {
+        var dotProduct = 0f
+        var normA = 0f
+        var normB = 0f
+        for (i in 0 until minOf(v1.size, v2.size)) {
+            dotProduct += v1[i] * v2[i]
+            normA += v1[i] * v1[i]
+            normB += v2[i] * v2[i]
+        }
+        val denom = kotlin.math.sqrt(normA) * kotlin.math.sqrt(normB)
+        return if (denom <= 0f) 0f else dotProduct / denom
+    }
+
+    private fun mapSimilarityToDisplay(rawSimilarity: Float): Float {
+        return when {
+            rawSimilarity >= 0.45f -> 0.99f
+            rawSimilarity <= 0.05f -> 0f
+            else -> {
+                0.1f + (rawSimilarity - 0.05f) * (0.85f / 0.40f)
+            }
+        }.coerceIn(0f, 1f)
     }
 
     private fun formatEtr(seconds: Long): String {

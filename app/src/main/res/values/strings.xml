@@ -1,3 +1,80 @@
 <resources>
-    <string name="app_name">AiMusic</string>
+    <string name="app_name">Aura AI</string>
+    <string name="start_title">Discover new sound with Aura AI</string>
+    <string name="start_description">Forgot what\'s stored in your phone\'s memory? Let the neural network listen to your collection. We will automatically assemble perfect playlists and find forgotten masterpieces among your downloaded files.</string>
+    <string name="grant_permissions">Grant Permissions</string>
+
+    <!-- Navigation -->
+    <string name="nav_playlists">Playlists</string>
+    <string name="nav_music">Music</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- AI Scan & Status -->
+    <string name="ai_analysis">AI Music Analysis</string>
+    <string name="analyzed_songs">Analyzed songs: %1$d</string>
+    <string name="start_ai_scan">Start AI Scan</string>
+    <string name="stop_ai_scan">Stop AI Scan</string>
+    <string name="ai_scan_complete">Scan Complete</string>
+    <string name="ai_scan_stopped">Scan Stopped</string>
+    <string name="ai_scan_error">Scan Error: %1$s</string>
+    <string name="ai_scan_hint">Analyze your library for AI recommendations</string>
+    <string name="ai_model_copying">Copying AI model from assets (first time)...</string>
+    <string name="ai_engine_init">Initializing AI engine...</string>
+    <string name="ai_model_error">Error loading AI model</string>
+    <string name="scanning_track">Scanning: %1$s</string>
+    <string name="scan_progress">%1$d/%2$d songs processed. ETR: %3$s</string>
+    <string name="no_songs_to_scan">No songs found to scan. Try refreshing library first.</string>
+    <string name="song_not_analyzed">Current song not analyzed. Run AI Scan first.</string>
+
+    <!-- Search -->
+    <string name="search_hint">AI Search (e.g. \'chill piano\')</string>
+    <string name="search_results">Search Results</string>
+    <string name="ai_recommendations">AI Recommendations</string>
+    <string name="clear_search">Clear</string>
+
+    <!-- Settings -->
+    <string name="library">Library</string>
+    <string name="refresh_library">Refresh Media Library</string>
+    <string name="scan_device_hint">Scan device for new music</string>
+    <string name="appearance">Appearance</string>
+    <string name="background_image">Background Image</string>
+    <string name="custom_background_active">Custom background active</string>
+    <string name="default_background">Default background</string>
+    <string name="transparency">Transparency</string>
+    <string name="equalizer">Equalizer</string>
+    <string name="eq_not_available">Equalizer not available</string>
+    <string name="reset">Reset</string>
+    <string name="save_preset">Save Preset</string>
+    <string name="presets">Presets</string>
+    <string name="preset_name">Preset Name</string>
+
+    <!-- Player & Queue -->
+    <string name="playback_queue">Playback Queue</string>
+    <string name="save_queue">Save Queue</string>
+    <string name="save_queue_title">Save Queue as Playlist</string>
+    <string name="new_playlist">New Playlist</string>
+    <string name="add_to_existing">Add to Existing</string>
+    <string name="overwrite_existing">Overwrite Existing</string>
+    <string name="playlist_name">Playlist Name</string>
+    <string name="no_playlists_yet">No playlists saved yet.</string>
+    <string name="songs_count">%1$d songs</string>
+
+    <!-- Sleep Timer -->
+    <string name="sleep_timer">Sleep Timer</string>
+    <string name="stop_timer">Stop Timer</string>
+    <string name="minutes">%1$d minutes</string>
+    <string name="timer_active">Active: %1$s remaining</string>
+
+    <!-- Dialogs & Menus -->
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="create">Create</string>
+    <string name="delete">Delete</string>
+    <string name="back">Back</string>
+    <string name="play_next">Play Next</string>
+    <string name="add_to_queue">Add to Queue</string>
+    <string name="add_to_playlist">Add to Playlist</string>
+    <string name="create_new_playlist">Create New Playlist</string>
+    <string name="delete_from_device">Delete from Device</string>
+    <string name="all_tracks">All Tracks</string>
 </resources>

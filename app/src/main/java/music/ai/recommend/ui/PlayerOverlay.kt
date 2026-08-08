@@ -11,7 +11,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import android.content.ContentUris
+import android.net.Uri
+import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import music.ai.recommend.MusicViewModel
 
 @Composable
@@ -23,7 +28,7 @@ fun PlayerOverlay(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val scannedIds by viewModel.scannedSongIds.collectAsState()
 
-    if (currentSong == null) return
+    val song = currentSong ?: return
 
     Surface(
         tonalElevation = 8.dp,
@@ -39,20 +44,42 @@ fun PlayerOverlay(
                     .padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val albumArtUri = ContentUris.withAppendedId(
+                    Uri.parse("content://media/external/audio/albumart"),
+                    song.albumId
+                )
+                SubcomposeAsyncImage(
+                    model = albumArtUri,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    error = {
+                        Icon(
+                            imageVector = Icons.Default.MusicNote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(4.dp)
+                        )
+                    }
+                )
+                Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = currentSong?.title ?: "",
+                        text = song.title,
                         style = MaterialTheme.typography.titleSmall,
                         maxLines = 1
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = currentSong?.artist ?: "",
+                            text = song.artist,
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (currentSong?.id in scannedIds) {
+                        if (song.id in scannedIds) {
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.AutoAwesome,

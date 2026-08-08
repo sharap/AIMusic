@@ -140,11 +140,21 @@ class AiScanner(private val context: Context) {
             val result = output.get(0).value as Array<FloatArray>
             
             // audio_embeds is [1, 512]
-            return result[0]
+            return normalize(result[0])
         } catch (e: Exception) {
             Log.e("AiScanner", "Inference failed", e)
             return FloatArray(512)
         }
+    }
+
+    private fun normalize(v: FloatArray): FloatArray {
+        var norm = 0f
+        for (x in v) norm += x * x
+        norm = kotlin.math.sqrt(norm)
+        if (norm > 0f) {
+            for (i in v.indices) v[i] /= norm
+        }
+        return v
     }
 
     private fun decodeAudioChunk(song: Song, durationMs: Long): FloatArray {
