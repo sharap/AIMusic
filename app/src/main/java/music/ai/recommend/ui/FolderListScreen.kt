@@ -8,10 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlaylistAdd
-import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +26,7 @@ fun FolderListScreen(
     val folders by viewModel.folders.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
     val activeFolderName = currentSong?.folderName
 
     var selectedFolderForMenu by remember { mutableStateOf<Folder?>(null) }
@@ -42,9 +40,11 @@ fun FolderListScreen(
             contentPadding = PaddingValues(16.dp)
         ) {
             items(folders) { folder ->
+                val scannedCount = folder.songs.count { it.id in scannedIds }
                 FolderItem(
                     folder = folder,
                     isActive = folder.name == activeFolderName,
+                    scannedCount = scannedCount,
                     onClick = { onFolderClick(folder.name) },
                     onLongClick = { selectedFolderForMenu = folder }
                 )
@@ -129,7 +129,7 @@ fun FolderListScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FolderItem(folder: Folder, isActive: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+fun FolderItem(folder: Folder, isActive: Boolean, scannedCount: Int, onClick: () -> Unit, onLongClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -158,11 +158,27 @@ fun FolderItem(folder: Folder, isActive: Boolean, onClick: () -> Unit, onLongCli
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
-            Text(
-                text = "${folder.songs.size} songs",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${folder.songs.size} songs",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (scannedCount > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = " $scannedCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
         }
     }
 }

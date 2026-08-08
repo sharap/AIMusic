@@ -4,9 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -23,6 +21,7 @@ fun PlayerOverlay(
 ) {
     val currentSong by viewModel.currentSong.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
 
     if (currentSong == null) return
 
@@ -46,11 +45,23 @@ fun PlayerOverlay(
                         style = MaterialTheme.typography.titleSmall,
                         maxLines = 1
                     )
-                    Text(
-                        text = currentSong?.artist ?: "",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = currentSong?.artist ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (currentSong?.id in scannedIds) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
+                    }
                     
                     val currentPosition by viewModel.currentPosition.collectAsState()
                     val duration by viewModel.duration.collectAsState()

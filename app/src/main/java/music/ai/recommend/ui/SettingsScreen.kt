@@ -137,6 +137,65 @@ fun SettingsScreen(viewModel: MusicViewModel) {
         item {
             Spacer(modifier = Modifier.height(24.dp))
             Text(
+                text = "AI Music Analysis",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    val isAiScanning by viewModel.isAiScanning.collectAsState()
+                    val aiScanProgress by viewModel.aiScanProgress.collectAsState()
+                    val aiScanStatus by viewModel.aiScanStatus.collectAsState()
+                    val scannedSongIds by viewModel.scannedSongIds.collectAsState()
+
+                    Text(
+                        text = "Analyzed songs: ${scannedSongIds.size}",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (isAiScanning) {
+                        Text(
+                            text = aiScanStatus,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { aiScanProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = { viewModel.stopAiScan() },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Stop AI Scan")
+                        }
+                    } else {
+                        Text(
+                            text = if (aiScanStatus.isNotEmpty()) aiScanStatus else "Analyze your library for AI recommendations",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = { viewModel.startAiScan() },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Start AI Scan")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
                 text = "Equalizer",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface

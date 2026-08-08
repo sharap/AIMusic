@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import music.ai.recommend.ai.AiScanner
 import music.ai.recommend.model.Folder
 import music.ai.recommend.model.Song
 import music.ai.recommend.scanner.MusicScanner
@@ -51,6 +53,7 @@ data class EqPreset(val name: String, val levels: List<Int>)
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val scanner = MusicScanner()
+    private val aiScanner by lazy { AiScanner(application) }
     private val gson = GsonBuilder()
         .registerTypeAdapter(Uri::class.java, UriAdapter())
         .create()
@@ -83,6 +86,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    private val _aiScanProgress = MutableStateFlow(0f)
+    val aiScanProgress: StateFlow<Float> = _aiScanProgress.asStateFlow()
+
+    private val _aiScanStatus = MutableStateFlow("")
+    val aiScanStatus: StateFlow<String> = _aiScanStatus.asStateFlow()
+
+    private val _isAiScanning = MutableStateFlow(false)
+    val isAiScanning: StateFlow<Boolean> = _isAiScanning.asStateFlow()
+
+    private val _scannedSongIds = MutableStateFlow<Set<Long>>(emptySet())
+    val scannedSongIds: StateFlow<Set<Long>> = _scannedSongIds.asStateFlow()
+
     private val _currentSong = MutableStateFlow<Song?>(null)
     val currentSong: StateFlow<Song?> = _currentSong.asStateFlow()
 
@@ -108,12 +123,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val queue: StateFlow<List<Song>> = _queue.asStateFlow()
 
     private var progressJob: Job? = null
+    private var aiScanJob: Job? = null
     private var playlistSongs: List<Song> = emptyList()
     private var allSongs: List<Song> = emptyList()
 
     init {
         loadPlaylists()
         loadEqPresets()
+        refreshScannedIds()
         _backgroundImageUri.value = prefs.getString("background_uri", null)
         _backgroundAlpha.value = prefs.getFloat("background_alpha", 0.3f)
         initializeController()
@@ -553,6 +570,104 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun stopProgressUpdate() {
         progressJob?.cancel()
+    }
+
+    fun startAiScan() {
+        if (_isAiScanning.value) return
+        if (allSongs.isEmpty()) {
+            _aiScanStatus.value = "No songs found to scan. Try refreshing library first."
+            return
+        }
+        _isAiScanning.value = true
+        aiScanJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                aiScanner.scanSongs(allSongs) { progress, status, index, etr ->
+                    _aiScanProgress.value = progress
+                    if (etr < 0) {
+                        _aiScanStatus.value = status
+                    } else {
+                        _aiScanStatus.value = "Scanning: $status\n$index/${allSongs.size} songs processed. ETR: ${formatEtr(etr)}"
+                    }
+                    if (index % 5 == 0) refreshScannedIds()
+                }
+            } catch (e: Exception) {
+                Log.e("MusicViewModel", "AI Scan failed", e)
+                _aiScanStatus.value = "Scan Error: ${e.message}"
+            } finally {
+                refreshScannedIds()
+                _isAiScanning.value = false
+                if (_aiScanStatus.value.startsWith("Scanning")) {
+                    _aiScanStatus.value = "Scan Complete"
+                }
+            }
+        }
+    }
+
+    private fun refreshScannedIds() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ids = aiScanner.getStoredEmbeddings().keys
+                _scannedSongIds.value = ids
+            } catch (e: Exception) {
+                Log.e("MusicViewModel", "Failed to refresh scanned IDs", e)
+            }
+        }
+    }
+
+    fun stopAiScan() {
+        aiScanner.stop()
+        aiScanJob?.cancel()
+        _isAiScanning.value = false
+        _aiScanStatus.value = "Scan Stopped"
+        refreshScannedIds()
+    }
+
+    fun playSimilar(song: Song) {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val embeddings = aiScanner.getStoredEmbeddings()
+                val currentEmbedding = embeddings[song.id] ?: run {
+                    withContext(Dispatchers.Main) {
+                        _aiScanStatus.value = "Current song not analyzed. Run AI Scan first."
+                    }
+                    return@launch
+                }
+                
+                val similarSongs = allSongs
+                    .filter { it.id in embeddings.keys && it.id != song.id }
+                    .map { otherSong ->
+                        val otherEmbedding = embeddings[otherSong.id]!!
+                        val distance = calculateDistance(currentEmbedding, otherEmbedding)
+                        otherSong to distance
+                    }
+                    .sortedBy { it.second }
+                    .map { it.first }
+                    .take(30)
+                
+                if (similarSongs.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        playSong(song, similarSongs)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MusicViewModel", "Play similar failed", e)
+            }
+        }
+    }
+
+    private fun calculateDistance(v1: List<Float>, v2: List<Float>): Float {
+        var sum = 0f
+        for (i in 0 until minOf(v1.size, v2.size)) {
+            val diff = v1[i] - v2[i]
+            sum += diff * diff
+        }
+        return kotlin.math.sqrt(sum)
+    }
+
+    private fun formatEtr(seconds: Long): String {
+        val m = seconds / 60
+        val s = seconds % 60
+        return String.format("%02d:%02d", m, s)
     }
 
     override fun onCleared() {

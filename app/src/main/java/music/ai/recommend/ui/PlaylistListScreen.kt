@@ -6,7 +6,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -20,6 +20,7 @@ import music.ai.recommend.Playlist
 @Composable
 fun PlaylistListScreen(viewModel: MusicViewModel) {
     val playlists by viewModel.playlists.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
 
     if (playlists.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -34,8 +35,10 @@ fun PlaylistListScreen(viewModel: MusicViewModel) {
             contentPadding = PaddingValues(16.dp)
         ) {
             items(playlists) { playlist ->
+                val scannedCount = playlist.songs.count { it.id in scannedIds }
                 PlaylistItem(
                     playlist = playlist,
+                    scannedCount = scannedCount,
                     onClick = { viewModel.playSong(playlist.songs.first(), playlist.songs) },
                     onDelete = { viewModel.deletePlaylist(playlist) }
                 )
@@ -45,7 +48,7 @@ fun PlaylistListScreen(viewModel: MusicViewModel) {
 }
 
 @Composable
-fun PlaylistItem(playlist: Playlist, onClick: () -> Unit, onDelete: () -> Unit) {
+fun PlaylistItem(playlist: Playlist, scannedCount: Int, onClick: () -> Unit, onDelete: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -66,11 +69,27 @@ fun PlaylistItem(playlist: Playlist, onClick: () -> Unit, onDelete: () -> Unit) 
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
-            Text(
-                text = "${playlist.songs.size} songs",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${playlist.songs.size} songs",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (scannedCount > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = " $scannedCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
         }
         IconButton(onClick = onDelete) {
             Icon(Icons.Default.Delete, contentDescription = "Delete")

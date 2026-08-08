@@ -37,6 +37,7 @@ fun PlayerScreen(
     val duration by viewModel.duration.collectAsState()
     val queue by viewModel.queue.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
     val shuffleModeEnabled by viewModel.shuffleModeEnabled.collectAsState()
     val repeatMode by viewModel.repeatMode.collectAsState()
     val audioSessionId by viewModel.audioSessionId.collectAsState()
@@ -77,17 +78,20 @@ fun PlayerScreen(
                     shuffleModeEnabled = shuffleModeEnabled,
                     repeatMode = repeatMode,
                     audioSessionId = audioSessionId,
+                    scannedIds = scannedIds,
                     onSeek = { viewModel.seekTo(it) },
                     onToggleShuffle = { viewModel.toggleShuffle() },
                     onNextRepeatMode = { viewModel.nextRepeatMode() },
                     onPrevious = { viewModel.previous() },
                     onNext = { viewModel.next() },
-                    onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() }
+                    onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() },
+                    onPlaySimilar = { viewModel.playSimilar(currentSong!!) }
                 )
             } else {
                 QueueList(
                     queue = queue,
                     playlists = playlists,
+                    scannedIds = scannedIds,
                     currentSong = currentSong,
                     onSongClick = { song -> viewModel.playSong(song, queue) },
                     onRemove = { index -> viewModel.removeFromQueue(index) },
@@ -130,12 +134,14 @@ fun PlayerMainContent(
     shuffleModeEnabled: Boolean,
     repeatMode: Int,
     audioSessionId: Int?,
+    scannedIds: Set<Long>,
     onSeek: (Long) -> Unit,
     onToggleShuffle: () -> Unit,
     onNextRepeatMode: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onPlayPause: () -> Unit
+    onPlayPause: () -> Unit,
+    onPlaySimilar: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -162,13 +168,25 @@ fun PlayerMainContent(
 
         Spacer(modifier = Modifier.height(48.dp))
 
-        Text(
-            text = currentSong.title,
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = currentSong.title,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            if (currentSong.id in scannedIds) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "AI Analyzed",
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
         Text(
             text = currentSong.artist,
             style = MaterialTheme.typography.titleLarge,
@@ -245,10 +263,15 @@ fun PlayerMainContent(
                         contentDescription = "Repeat",
                         tint = tint
                     )
-                    if (repeatMode == Player.REPEAT_MODE_OFF) {
-                        // Optional: could add a diagonal line or just keep it dim
-                    }
                 }
+            }
+
+            IconButton(onClick = onPlaySimilar) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "Play Similar",
+                    tint = MaterialTheme.colorScheme.secondary
+                )
             }
         }
 
@@ -260,6 +283,7 @@ fun PlayerMainContent(
 fun QueueList(
     queue: List<Song>,
     playlists: List<Playlist>,
+    scannedIds: Set<Long>,
     currentSong: Song?,
     onSongClick: (Song) -> Unit,
     onRemove: (Int) -> Unit,
@@ -409,13 +433,25 @@ fun QueueList(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = song.artist,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f) else MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = song.artist,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f) else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (song.id in scannedIds) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                        }
                     }
                     
                     IconButton(onClick = { onRemove(index) }) {

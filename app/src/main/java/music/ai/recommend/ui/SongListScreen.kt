@@ -11,10 +11,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,6 +29,7 @@ fun SongListScreen(
     val folders by viewModel.folders.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
     val folder = folders.find { it.name == folderName }
     val songs = folder?.songs ?: emptyList()
 
@@ -56,9 +54,11 @@ fun SongListScreen(
         ) {
             itemsIndexed(songs) { _, song ->
                 val isActive = song.id == currentSong?.id
+                val isScanned = song.id in scannedIds
                 SongItem(
                     song = song,
                     isActive = isActive,
+                    isScanned = isScanned,
                     onClick = { viewModel.playSong(song, songs) },
                     onLongClick = { selectedSongForMenu = song }
                 )
@@ -153,6 +153,7 @@ fun SongListScreen(
 fun SongItem(
     song: Song,
     isActive: Boolean,
+    isScanned: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -178,16 +179,29 @@ fun SongItem(
             modifier = Modifier.size(40.dp)
         )
         Spacer(modifier = Modifier.width(16.dp))
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = song.title,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
             Text(
                 text = song.artist,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
+        
+        if (isScanned) {
+            Icon(
+                imageVector = Icons.Default.AutoAwesome,
+                contentDescription = "AI Analyzed",
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(16.dp)
             )
         }
     }
