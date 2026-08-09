@@ -23,4 +23,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "AiMusic"
-include(":app")
+// include(":app")
+include(":composeApp")

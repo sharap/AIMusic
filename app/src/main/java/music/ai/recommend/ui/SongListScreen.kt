@@ -8,9 +8,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
@@ -43,7 +45,7 @@ fun SongListScreen(
     val favoriteIds by viewModel.favoriteSongIds.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     
-    val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
     var selectedSongForMenu by remember { mutableStateOf<Song?>(null) }
     var showPlaylistPicker by remember { mutableStateOf(false) }
     var showNewPlaylistDialog by remember { mutableStateOf(false) }
@@ -52,7 +54,7 @@ fun SongListScreen(
     LaunchedEffect(currentSong) {
         val index = songs.indexOfFirst { it.id == currentSong?.id }
         if (index >= 0) {
-            listState.animateScrollToItem(index)
+            gridState.animateScrollToItem(index)
         }
     }
 
@@ -76,10 +78,12 @@ fun SongListScreen(
         }
 
         Box(modifier = Modifier.weight(1f)) {
-            LazyColumn(
-                state = listState,
+            LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Adaptive(minSize = 300.dp),
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp)
+                contentPadding = PaddingValues(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 itemsIndexed(songs, key = { _, song -> song.id }) { _, song ->
                     val isActive = song.id == currentSong?.id

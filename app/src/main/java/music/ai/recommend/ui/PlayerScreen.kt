@@ -22,9 +22,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
+import androidx.window.core.layout.WindowWidthSizeClass
 import androidx.media3.common.Player
 import android.content.ContentUris
 import android.net.Uri
@@ -61,6 +65,8 @@ fun PlayerScreen(
 
     val pagerState = rememberPagerState(pageCount = { 2 })
     var showSleepTimerDialog by remember { mutableStateOf(false) }
+    val windowSizeClass = currentWindowAdaptiveInfo().windowSizeClass
+    val isExpanded = windowSizeClass.windowWidthSizeClass == WindowWidthSizeClass.EXPANDED
 
     Column(
         modifier = Modifier
@@ -96,65 +102,110 @@ fun PlayerScreen(
             }
         }
 
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.weight(1f)
-        ) { page ->
-            if (page == 0) {
-                PlayerMainContent(
-                    currentSong = song,
-                    isPlaying = isPlaying,
-                    currentPosition = currentPosition,
-                    duration = duration,
-                    shuffleModeEnabled = shuffleModeEnabled,
-                    repeatMode = repeatMode,
-                    audioSessionId = audioSessionId,
-                    scannedIds = scannedIds,
-                    aiShuffleEnabled = aiShuffleEnabled,
-                    isFavorite = song.id in favoriteIds,
-                    onToggleFavorite = { viewModel.toggleFavorite(song.id) },
-                    onSeek = { viewModel.seekTo(it) },
-                    onToggleShuffle = { viewModel.toggleShuffle() },
-                    onToggleAiShuffle = { viewModel.toggleAiShuffle() },
-                    onNextRepeatMode = { viewModel.nextRepeatMode() },
-                    onPrevious = { viewModel.previous() },
-                    onNext = { viewModel.next() },
-                    onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() },
-                    onPlaySimilar = { viewModel.playSimilar(song) }
-                )
-            } else {
-                QueueList(
-                    queue = queue,
-                    playlists = playlists,
-                    scannedIds = scannedIds,
-                    currentSong = song,
-                    onSongClick = { s -> viewModel.playSong(s, queue) },
-                    onRemove = { index -> viewModel.removeFromQueue(index) },
-                    onMove = { from, to -> viewModel.moveQueueItem(from, to) },
-                    onSaveNew = { name -> viewModel.createPlaylistWithSongs(name, queue) },
-                    onAddToExisting = { name -> viewModel.addSongsToPlaylist(name, queue) },
-                    onOverwriteExisting = { name -> viewModel.overwritePlaylist(name, queue) }
-                )
+        if (isExpanded) {
+            Row(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f)) {
+                    PlayerMainContent(
+                        currentSong = song,
+                        isPlaying = isPlaying,
+                        currentPosition = currentPosition,
+                        duration = duration,
+                        shuffleModeEnabled = shuffleModeEnabled,
+                        repeatMode = repeatMode,
+                        audioSessionId = audioSessionId,
+                        scannedIds = scannedIds,
+                        aiShuffleEnabled = aiShuffleEnabled,
+                        isFavorite = song.id in favoriteIds,
+                        isExpanded = true,
+                        onToggleFavorite = { viewModel.toggleFavorite(song.id) },
+                        onSeek = { viewModel.seekTo(it) },
+                        onToggleShuffle = { viewModel.toggleShuffle() },
+                        onToggleAiShuffle = { viewModel.toggleAiShuffle() },
+                        onNextRepeatMode = { viewModel.nextRepeatMode() },
+                        onPrevious = { viewModel.previous() },
+                        onNext = { viewModel.next() },
+                        onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() },
+                        onPlaySimilar = { viewModel.playSimilar(song) }
+                    )
+                }
+                Box(modifier = Modifier.weight(1f)) {
+                    QueueList(
+                        queue = queue,
+                        playlists = playlists,
+                        scannedIds = scannedIds,
+                        currentSong = song,
+                        onSongClick = { s -> viewModel.playSong(s, queue) },
+                        onRemove = { index -> viewModel.removeFromQueue(index) },
+                        onMove = { from, to -> viewModel.moveQueueItem(from, to) },
+                        onSaveNew = { name -> viewModel.createPlaylistWithSongs(name, queue) },
+                        onAddToExisting = { name -> viewModel.addSongsToPlaylist(name, queue) },
+                        onOverwriteExisting = { name -> viewModel.overwritePlaylist(name, queue) }
+                    )
+                }
             }
-        }
+        } else {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.weight(1f)
+            ) { page ->
+                if (page == 0) {
+                    PlayerMainContent(
+                        currentSong = song,
+                        isPlaying = isPlaying,
+                        currentPosition = currentPosition,
+                        duration = duration,
+                        shuffleModeEnabled = shuffleModeEnabled,
+                        repeatMode = repeatMode,
+                        audioSessionId = audioSessionId,
+                        scannedIds = scannedIds,
+                        aiShuffleEnabled = aiShuffleEnabled,
+                        isFavorite = song.id in favoriteIds,
+                        isExpanded = false,
+                        onToggleFavorite = { viewModel.toggleFavorite(song.id) },
+                        onSeek = { viewModel.seekTo(it) },
+                        onToggleShuffle = { viewModel.toggleShuffle() },
+                        onToggleAiShuffle = { viewModel.toggleAiShuffle() },
+                        onNextRepeatMode = { viewModel.nextRepeatMode() },
+                        onPrevious = { viewModel.previous() },
+                        onNext = { viewModel.next() },
+                        onPlayPause = { if (isPlaying) viewModel.pause() else viewModel.resume() },
+                        onPlaySimilar = { viewModel.playSimilar(song) }
+                    )
+                }
+else {
+                    QueueList(
+                        queue = queue,
+                        playlists = playlists,
+                        scannedIds = scannedIds,
+                        currentSong = song,
+                        onSongClick = { s -> viewModel.playSong(s, queue) },
+                        onRemove = { index -> viewModel.removeFromQueue(index) },
+                        onMove = { from, to -> viewModel.moveQueueItem(from, to) },
+                        onSaveNew = { name -> viewModel.createPlaylistWithSongs(name, queue) },
+                        onAddToExisting = { name -> viewModel.addSongsToPlaylist(name, queue) },
+                        onOverwriteExisting = { name -> viewModel.overwritePlaylist(name, queue) }
+                    )
+                }
+            }
 
-        // Pager Indicators
-        Row(
-            Modifier
-                .height(50.dp)
-                .fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            repeat(2) { iteration ->
-                val color = if (pagerState.currentPage == iteration) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-                Box(
-                    modifier = Modifier
-                        .padding(4.dp)
-                        .clip(CircleShape)
-                        .background(color)
-                        .size(8.dp)
-                )
+            // Pager Indicators
+            Row(
+                Modifier
+                    .height(50.dp)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(2) { iteration ->
+                    val color = if (pagerState.currentPage == iteration) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    Box(
+                        modifier = Modifier
+                            .padding(4.dp)
+                            .clip(CircleShape)
+                            .background(color)
+                            .size(8.dp)
+                    )
+                }
             }
         }
 
@@ -181,6 +232,7 @@ fun PlayerMainContent(
     scannedIds: Set<Long>,
     aiShuffleEnabled: Boolean,
     isFavorite: Boolean,
+    isExpanded: Boolean = false,
     onToggleFavorite: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleShuffle: () -> Unit,
@@ -194,26 +246,33 @@ fun PlayerMainContent(
     val haptic = LocalHapticFeedback.current
     var sliderPosition by remember { mutableStateOf<Float?>(null) }
     val displayPosition = sliderPosition ?: currentPosition.toFloat()
+    val scrollState = rememberScrollState()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(if (isExpanded) 16.dp else 24.dp)
+            .verticalScroll(scrollState),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = if (isExpanded) Arrangement.Top else Arrangement.Center
     ) {
-        Spacer(modifier = Modifier.weight(1f))
+        if (!isExpanded) {
+            Spacer(modifier = Modifier.weight(1f))
+        }
 
         Box(contentAlignment = Alignment.Center) {
             val albumArtUri = ContentUris.withAppendedId(
                 Uri.parse("content://media/external/audio/albumart"),
                 currentSong.albumId
             )
+            val albumSize = if (isExpanded) 140.dp else 240.dp
+            val visualizerSize = if (isExpanded) 180.dp else 280.dp
+            
             SubcomposeAsyncImage(
                 model = albumArtUri,
                 contentDescription = null,
                 modifier = Modifier
-                    .size(240.dp)
+                    .size(albumSize)
                     .clip(MaterialTheme.shapes.large)
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
@@ -221,7 +280,7 @@ fun PlayerMainContent(
                     Icon(
                         imageVector = Icons.Default.MusicNote,
                         contentDescription = null,
-                        modifier = Modifier.size(120.dp),
+                        modifier = Modifier.size(albumSize / 2),
                         tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                     )
                 }
@@ -229,16 +288,16 @@ fun PlayerMainContent(
             BarVisualizer(
                 audioSessionId = audioSessionId,
                 isPlaying = isPlaying,
-                modifier = Modifier.size(280.dp)
+                modifier = Modifier.size(visualizerSize)
             )
         }
 
-        Spacer(modifier = Modifier.height(48.dp))
+        Spacer(modifier = Modifier.height(if (isExpanded) 12.dp else 48.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = currentSong.title,
-                style = MaterialTheme.typography.headlineMedium,
+                style = if (isExpanded) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -250,19 +309,19 @@ fun PlayerMainContent(
                     imageVector = Icons.Default.AutoAwesome,
                     contentDescription = "AI Analyzed",
                     tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(if (isExpanded) 18.dp else 24.dp)
                 )
             }
         }
         Text(
             text = currentSong.artist,
-            style = MaterialTheme.typography.titleLarge,
+            style = if (isExpanded) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(if (isExpanded) 8.dp else 32.dp))
 
         Slider(
             value = displayPosition,
@@ -278,15 +337,15 @@ fun PlayerMainContent(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(text = formatTime(displayPosition.toLong()))
-            Text(text = formatTime(duration))
+            Text(text = formatTime(displayPosition.toLong()), style = MaterialTheme.typography.labelSmall)
+            Text(text = formatTime(duration), style = MaterialTheme.typography.labelSmall)
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(if (isExpanded) 8.dp else 32.dp))
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(if (isExpanded) 8.dp else 16.dp)
         ) {
             IconButton(onClick = {
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -296,27 +355,28 @@ fun PlayerMainContent(
                     imageVector = Icons.Default.AutoMode,
                     contentDescription = "AI Shuffle",
                     tint = if (aiShuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(if (isExpanded) 24.dp else 32.dp)
                 )
             }
             IconButton(onClick = onPrevious) {
-                Icon(imageVector = Icons.Default.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(48.dp))
+                Icon(imageVector = Icons.Default.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(if (isExpanded) 36.dp else 48.dp))
             }
             FloatingActionButton(
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onPlayPause()
                 },
-                containerColor = MaterialTheme.colorScheme.primaryContainer
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                modifier = if (isExpanded) Modifier.size(48.dp) else Modifier
             ) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(if (isExpanded) 32.dp else 48.dp)
                 )
             }
             IconButton(onClick = onNext) {
-                Icon(imageVector = Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(48.dp))
+                Icon(imageVector = Icons.Default.SkipNext, contentDescription = "Next", modifier = Modifier.size(if (isExpanded) 36.dp else 48.dp))
             }
             IconButton(onClick = {
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -326,12 +386,12 @@ fun PlayerMainContent(
                     imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                     contentDescription = "Favorite",
                     tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(if (isExpanded) 24.dp else 32.dp)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(if (isExpanded) 8.dp else 24.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -342,7 +402,8 @@ fun PlayerMainContent(
                 Icon(
                     imageVector = Icons.Default.Shuffle,
                     contentDescription = "Shuffle",
-                    tint = if (shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = if (shuffleModeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(if (isExpanded) 20.dp else 24.dp)
                 )
             }
 
@@ -358,7 +419,8 @@ fun PlayerMainContent(
                     Icon(
                         imageVector = icon,
                         contentDescription = "Repeat",
-                        tint = tint
+                        tint = tint,
+                        modifier = Modifier.size(if (isExpanded) 20.dp else 24.dp)
                     )
                 }
             }
@@ -367,12 +429,15 @@ fun PlayerMainContent(
                 Icon(
                     imageVector = Icons.Default.AutoAwesome,
                     contentDescription = "Play Similar",
-                    tint = MaterialTheme.colorScheme.secondary
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(if (isExpanded) 20.dp else 24.dp)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
+        if (!isExpanded) {
+            Spacer(modifier = Modifier.weight(1f))
+        }
     }
 }
 
