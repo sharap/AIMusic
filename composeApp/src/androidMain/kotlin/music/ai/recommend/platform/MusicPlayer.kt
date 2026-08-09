@@ -13,4 +13,5 @@ actual class MusicPlayer actual constructor() {
     actual val isPlaying: Boolean = false
     actual val currentPosition: Long = 0L
     actual val duration: Long = 0L
+    actual fun release() {}
 }

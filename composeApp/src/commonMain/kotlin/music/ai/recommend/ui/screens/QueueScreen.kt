@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,22 +17,36 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.ui.components.SongItem
+import music.ai.recommend.model.Song
 
 @Composable
-fun QueueScreen(viewModel: MusicViewModel) {
+fun QueueScreen(
+    viewModel: MusicViewModel,
+    modifier: Modifier = Modifier,
+    onSaveQueue: (List<Song>) -> Unit = {},
+    onShowInfo: (Song) -> Unit = {}
+) {
     val queue by viewModel.queue.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
+    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
     val listState = rememberLazyListState()
 
-    Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+    Column(modifier = modifier.fillMaxSize().padding(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Playback Queue", style = MaterialTheme.typography.titleMedium)
-            IconButton(onClick = { viewModel.clearQueue() }) {
-                Icon(Icons.Default.ClearAll, contentDescription = "Clear Queue")
+            Row {
+                if (queue.isNotEmpty()) {
+                    IconButton(onClick = { onSaveQueue(queue) }) {
+                        Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = "Save Queue to Playlist")
+                    }
+                }
+                IconButton(onClick = { viewModel.clearQueue() }) {
+                    Icon(Icons.Default.ClearAll, contentDescription = "Clear Queue")
+                }
             }
         }
 
@@ -51,6 +66,12 @@ fun QueueScreen(viewModel: MusicViewModel) {
                                 SongItem(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
+                                    isFavorite = favoriteIds.contains(song.id),
+                                    onFavoriteClick = { viewModel.toggleFavorite(song) },
+                                    onPlayNext = { viewModel.playNext(song) },
+                                    onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                    onDelete = { viewModel.deleteSong(song) },
+                                    onShowInfo = { onShowInfo(song) },
                                     onClick = { viewModel.playSong(song) }
                                 )
                             }

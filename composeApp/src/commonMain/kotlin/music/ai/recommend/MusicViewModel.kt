@@ -93,6 +93,18 @@ class MusicViewModel : ViewModel() {
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
 
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _isSearchActive = MutableStateFlow(false)
+    val isSearchActive: StateFlow<Boolean> = _isSearchActive.asStateFlow()
+
+    private val _favoriteSongIds = MutableStateFlow<Set<Long>>(emptySet())
+    val favoriteSongIds: StateFlow<Set<Long>> = _favoriteSongIds.asStateFlow()
+
+    private val _selectedPlaylist = MutableStateFlow<Playlist?>(null)
+    val selectedPlaylist: StateFlow<Playlist?> = _selectedPlaylist.asStateFlow()
+
     private var allSongs: List<Song> = emptyList()
     private var progressJob: kotlinx.coroutines.Job? = null
 
@@ -204,7 +216,7 @@ class MusicViewModel : ViewModel() {
     fun playSong(song: Song, fromList: List<Song> = emptyList()) {
         if (fromList.isNotEmpty()) {
             _queue.value = fromList
-        } else if (!_queue.value.contains(song)) {
+        } else if (!_queue.value.any { it.id == song.id }) {
             _queue.value = _queue.value + song
         }
         
@@ -212,6 +224,48 @@ class MusicViewModel : ViewModel() {
         player.play(song)
         _isPlaying.value = true
         startProgressTracker()
+    }
+
+    fun playNext(song: Song) {
+        val currentQueue = _queue.value.toMutableList()
+        val currentIndex = currentQueue.indexOfFirst { it.id == _currentSong.value?.id }
+        
+        // Remove if already in queue to re-position it
+        currentQueue.removeAll { it.id == song.id }
+        
+        if (currentIndex != -1) {
+            currentQueue.add(currentIndex + 1, song)
+        } else {
+            currentQueue.add(0, song)
+        }
+        _queue.value = currentQueue
+    }
+
+    fun addToEndOfQueue(song: Song) {
+        if (!_queue.value.any { it.id == song.id }) {
+            _queue.value = _queue.value + song
+        }
+    }
+
+    fun deleteSong(song: Song) {
+        // Remove from current state
+        _folders.value = _folders.value.map { folder ->
+            folder.copy(songs = folder.songs.filter { it.id != song.id })
+        }.filter { it.songs.isNotEmpty() }
+        
+        _queue.value = _queue.value.filter { it.id != song.id }
+        
+        if (_currentSong.value?.id == song.id) {
+            next()
+        }
+
+        // Try delete from disk (platform specific ideally, but we have path)
+        try {
+            val file = java.io.File(song.path)
+            if (file.exists()) file.delete()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     fun resume() {
@@ -273,6 +327,15 @@ class MusicViewModel : ViewModel() {
         _currentPosition.value = position
     }
 
+    fun seekRelative(offsetMs: Long) {
+        val newPos = (_currentPosition.value + offsetMs).coerceIn(0, _duration.value)
+        seekTo(newPos)
+    }
+
+    fun togglePlayPause() {
+        if (_isPlaying.value) pause() else resume()
+    }
+
     private fun startProgressTracker() {
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
@@ -296,6 +359,62 @@ class MusicViewModel : ViewModel() {
 
     fun clearQueue() {
         _queue.value = emptyList()
+    }
+
+    fun createPlaylist(name: String) {
+        val newPlaylist = Playlist(id = System.currentTimeMillis(), name = name, songs = emptyList())
+        _playlists.value = _playlists.value + newPlaylist
+    }
+
+    fun deletePlaylist(playlist: Playlist) {
+        _playlists.value = _playlists.value.filter { it.id != playlist.id }
+        if (_selectedPlaylist.value?.id == playlist.id) {
+            _selectedPlaylist.value = null
+        }
+    }
+
+    fun selectPlaylist(playlist: Playlist?) {
+        _selectedPlaylist.value = playlist
+    }
+
+    fun addSongToPlaylist(playlist: Playlist, song: Song) {
+        _playlists.value = _playlists.value.map { 
+            if (it.id == playlist.id) {
+                if (!it.songs.contains(song)) it.copy(songs = it.songs + song) else it
+            } else it 
+        }
+        if (_selectedPlaylist.value?.id == playlist.id) {
+            _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
+        }
+    }
+
+    fun removeSongFromPlaylist(playlist: Playlist, song: Song) {
+        _playlists.value = _playlists.value.map {
+            if (it.id == playlist.id) {
+                it.copy(songs = it.songs.filter { s -> s.id != song.id })
+            } else it
+        }
+        if (_selectedPlaylist.value?.id == playlist.id) {
+            _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
+        }
+    }
+
+    fun toggleFavorite(song: Song) {
+        val current = _favoriteSongIds.value.toMutableSet()
+        if (current.contains(song.id)) {
+            current.remove(song.id)
+        } else {
+            current.add(song.id)
+        }
+        _favoriteSongIds.value = current
+    }
+
+    fun isFavorite(songId: Long): Boolean {
+        return _favoriteSongIds.value.contains(songId)
+    }
+
+    fun getFavoriteSongs(): List<Song> {
+        return allSongs.filter { _favoriteSongIds.value.contains(it.id) }
     }
 
     fun setBackgroundImage(uri: String?) {
@@ -349,5 +468,20 @@ class MusicViewModel : ViewModel() {
         _scannedSongIds.value = emptySet()
         _aiScanStatus.value = ""
         _aiScanProgress.value = 0f
+    }
+
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun setSearchActive(active: Boolean) {
+        _isSearchActive.value = active
+        if (!active) {
+            _searchQuery.value = ""
+        }
+    }
+
+    fun release() {
+        player.release()
     }
 }

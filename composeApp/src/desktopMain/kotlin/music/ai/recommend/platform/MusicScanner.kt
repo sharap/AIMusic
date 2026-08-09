@@ -16,7 +16,6 @@ actual class MusicScanner actual constructor() {
     }
 
     actual fun scanMusic(): List<Folder> {
-        // This is a fallback if no path is provided, but we should use the one from settings
         return scanCustomPath(System.getProperty("user.home") + "/Music")
     }
 
@@ -45,7 +44,9 @@ actual class MusicScanner actual constructor() {
                     val title = fixEncoding(tag?.getFirst(FieldKey.TITLE)) ?: file.nameWithoutExtension
                     val artist = fixEncoding(tag?.getFirst(FieldKey.ARTIST)) ?: "Unknown Artist"
                     val album = fixEncoding(tag?.getFirst(FieldKey.ALBUM)) ?: "Unknown Album"
+                    val year = tag?.getFirst(FieldKey.YEAR) ?: ""
                     val duration = (header?.trackLength ?: 0).toLong() * 1000
+                    val size = file.length()
                     
                     result.add(
                         Song(
@@ -57,7 +58,9 @@ actual class MusicScanner actual constructor() {
                             duration = duration,
                             uri = file.toURI().toString(),
                             path = file.absolutePath,
-                            folderName = dir.name
+                            folderName = dir.name,
+                            year = year,
+                            size = size
                         )
                     )
                 } catch (e: Exception) {
@@ -71,7 +74,8 @@ actual class MusicScanner actual constructor() {
                             duration = 0L,
                             uri = file.toURI().toString(),
                             path = file.absolutePath,
-                            folderName = dir.name
+                            folderName = dir.name,
+                            size = file.length()
                         )
                     )
                 }
@@ -79,20 +83,11 @@ actual class MusicScanner actual constructor() {
         }
     }
 
-    /**
-     * Attempts to fix common encoding issues where CP1251 (Cyrillic) 
-     * is incorrectly read as ISO-8859-1.
-     */
     private fun fixEncoding(text: String?): String? {
         if (text == null || text.isBlank()) return null
-        
-        // If the string contains characters typical for incorrectly decoded Cyrillic
-        // (like 'à', 'á', 'â' etc. instead of Russian letters)
         return try {
             val bytes = text.toByteArray(Charset.forName("ISO-8859-1"))
             val decoded = String(bytes, Charset.forName("Windows-1251"))
-            
-            // Basic check: if decoded string has more "normal" Cyrillic chars than original
             if (decoded.any { it in '\u0410'..'\u044F' }) {
                 decoded
             } else {

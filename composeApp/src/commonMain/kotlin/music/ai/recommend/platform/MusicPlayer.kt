@@ -13,4 +13,5 @@ expect class MusicPlayer() {
     val currentPosition: Long
     val duration: Long
     fun setEqBand(index: Int, level: Float)
+    fun release()
 }

@@ -15,3 +15,8 @@ actual fun pickImageFile(): String? {
 actual fun rememberLocalImagePainter(path: String?): Painter? {
     return null
 }
+
+@Composable
+actual fun rememberArtworkPainter(songPath: String?): Painter? {
+    return null
+}

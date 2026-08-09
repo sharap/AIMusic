@@ -60,7 +60,6 @@ actual class MusicPlayer actual constructor() {
 
     actual fun setEqBand(index: Int, level: Float) {
         try {
-            // VLC equalizer band levels are in dB, typically -20 to 20
             equalizer?.setAmp(index, level)
         } catch (e: Exception) {}
     }
@@ -73,4 +72,9 @@ actual class MusicPlayer actual constructor() {
 
     actual val duration: Long
         get() = _duration
+
+    actual fun release() {
+        mediaPlayer?.release()
+        factory?.release()
+    }
 }

@@ -13,9 +13,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Color
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.PlaybackMode
 import music.ai.recommend.ui.components.BarVisualizer
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import music.ai.recommend.platform.rememberArtworkPainter
 
 @Composable
 fun PlayerScreen(viewModel: MusicViewModel) {
@@ -24,8 +28,11 @@ fun PlayerScreen(viewModel: MusicViewModel) {
     val currentPosition by viewModel.currentPosition.collectAsState()
     val duration by viewModel.duration.collectAsState()
     val playbackMode by viewModel.playbackMode.collectAsState()
+    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
 
     val song = currentSong
+    val isFavorite = song?.let { favoriteIds.contains(it.id) } ?: false
+    val artworkPainter = rememberArtworkPainter(song?.path)
 
     Column(
         modifier = Modifier
@@ -44,21 +51,30 @@ fun PlayerScreen(viewModel: MusicViewModel) {
             Spacer(modifier = Modifier.height(16.dp))
             Text("Select a song to play", style = MaterialTheme.typography.bodyLarge)
         } else {
-            // Album Art Placeholder
+            // Album Art Placeholder / Real Art
             Box(contentAlignment = Alignment.Center) {
                 Box(
                     modifier = Modifier
                         .size(240.dp)
                         .clip(MaterialTheme.shapes.large)
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.MusicNote,
-                        contentDescription = null,
-                        modifier = Modifier.size(120.dp),
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                    )
+                    if (artworkPainter != null) {
+                        Image(
+                            painter = artworkPainter,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.MusicNote,
+                            contentDescription = null,
+                            modifier = Modifier.size(120.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                        )
+                    }
                 }
                 BarVisualizer(
                     isPlaying = isPlaying,
@@ -103,7 +119,7 @@ fun PlayerScreen(viewModel: MusicViewModel) {
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(24.dp)
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 IconButton(onClick = { viewModel.cyclePlaybackMode() }) {
                     val icon = when (playbackMode) {
@@ -118,20 +134,32 @@ fun PlayerScreen(viewModel: MusicViewModel) {
                 }
                 
                 IconButton(onClick = { viewModel.previous() }) {
-                    Icon(Icons.Default.SkipPrevious, contentDescription = null, modifier = Modifier.size(48.dp))
+                    Icon(Icons.Default.SkipPrevious, contentDescription = null, modifier = Modifier.size(32.dp))
                 }
+                
                 FloatingActionButton(
                     onClick = { if (isPlaying) viewModel.pause() else viewModel.resume() },
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    shape = CircleShape
                 ) {
                     Icon(
                         imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = null,
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(32.dp)
                     )
                 }
+                
                 IconButton(onClick = { viewModel.next() }) {
-                    Icon(Icons.Default.SkipNext, contentDescription = null, modifier = Modifier.size(48.dp))
+                    Icon(Icons.Default.SkipNext, contentDescription = null, modifier = Modifier.size(32.dp))
+                }
+
+                IconButton(onClick = { viewModel.toggleFavorite(song) }) {
+                    Icon(
+                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = "Favorite",
+                        tint = if (isFavorite) Color.Red else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }

@@ -8,3 +8,6 @@ expect fun pickImageFile(): String?
 
 @Composable
 expect fun rememberLocalImagePainter(path: String?): Painter?
+
+@Composable
+expect fun rememberArtworkPainter(songPath: String?): Painter?

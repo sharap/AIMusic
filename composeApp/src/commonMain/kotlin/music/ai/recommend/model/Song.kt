@@ -12,5 +12,7 @@ data class Song(
     val duration: Long,
     val uri: String,
     val path: String,
-    val folderName: String
+    val folderName: String,
+    val year: String = "",
+    val size: Long = 0L
 )
