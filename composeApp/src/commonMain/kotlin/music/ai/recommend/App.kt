@@ -425,7 +425,7 @@ fun MainContentArea(
     onAddSongs: (List<music.ai.recommend.model.Song>) -> Unit,
     onShowInfo: (music.ai.recommend.model.Song) -> Unit
 ) {
-    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
+    val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
@@ -583,7 +583,7 @@ fun MainContentArea(
                                                 ListItem(
                                                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                                                     headlineContent = { Text("Favorites") },
-                                                    supportingContent = { Text("${favoriteIds.size} tracks") },
+                                                    supportingContent = { Text("${favoritePaths.size} tracks") },
                                                     leadingContent = { Icon(Icons.Default.Favorite, contentDescription = null, tint = Color.Red) }
                                                 )
                                             }
@@ -637,7 +637,7 @@ fun MainContentArea(
                                             SongItem(
                                                 song = song,
                                                 isActive = song.id == currentSong?.id,
-                                                isFavorite = favoriteIds.contains(song.id),
+                                                isFavorite = favoritePaths.contains(song.path),
                                                 onFavoriteClick = { viewModel.toggleFavorite(song) },
                                                 onPlayNext = { viewModel.playNext(song) },
                                                 onAddToEnd = { viewModel.addToEndOfQueue(song) },

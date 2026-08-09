@@ -18,7 +18,7 @@ import androidx.compose.ui.graphics.Color
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.platform.pickDirectory
 import music.ai.recommend.platform.pickImageFile
-import music.ai.recommend.EqPreset
+import music.ai.recommend.model.*
 
 @Composable
 fun SettingsScreen(viewModel: MusicViewModel) {

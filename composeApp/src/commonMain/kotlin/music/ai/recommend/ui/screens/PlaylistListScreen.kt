@@ -27,7 +27,7 @@ fun PlaylistListScreen(
     val playlists by viewModel.playlists.collectAsState()
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
-    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
+    val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     
@@ -73,7 +73,7 @@ fun PlaylistListScreen(
                                 SongItem(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
-                                    isFavorite = favoriteIds.contains(song.id),
+                                    isFavorite = favoritePaths.contains(song.path),
                                     onFavoriteClick = { viewModel.toggleFavorite(song) },
                                     onPlayNext = { viewModel.playNext(song) },
                                     onAddToEnd = { viewModel.addToEndOfQueue(song) },
@@ -155,7 +155,7 @@ fun PlaylistListScreen(
                                 SongItem(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
-                                    isFavorite = favoriteIds.contains(song.id),
+                                    isFavorite = favoritePaths.contains(song.path),
                                     onFavoriteClick = { viewModel.toggleFavorite(song) },
                                     onPlayNext = { viewModel.playNext(song) },
                                     onAddToEnd = { viewModel.addToEndOfQueue(song) },

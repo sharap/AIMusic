@@ -28,10 +28,10 @@ fun PlayerScreen(viewModel: MusicViewModel) {
     val currentPosition by viewModel.currentPosition.collectAsState()
     val duration by viewModel.duration.collectAsState()
     val playbackMode by viewModel.playbackMode.collectAsState()
-    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
+    val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
 
     val song = currentSong
-    val isFavorite = song?.let { favoriteIds.contains(it.id) } ?: false
+    val isFavorite = song?.let { favoritePaths.contains(it.path) } ?: false
     val artworkPainter = rememberArtworkPainter(song?.path)
 
     Column(

@@ -28,7 +28,7 @@ fun QueueScreen(
 ) {
     val queue by viewModel.queue.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
-    val favoriteIds by viewModel.favoriteSongIds.collectAsState()
+    val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
     val listState = rememberLazyListState()
 
     Column(modifier = modifier.fillMaxSize().padding(8.dp)) {
@@ -66,7 +66,7 @@ fun QueueScreen(
                                 SongItem(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
-                                    isFavorite = favoriteIds.contains(song.id),
+                                    isFavorite = favoritePaths.contains(song.path),
                                     onFavoriteClick = { viewModel.toggleFavorite(song) },
                                     onPlayNext = { viewModel.playNext(song) },
                                     onAddToEnd = { viewModel.addToEndOfQueue(song) },

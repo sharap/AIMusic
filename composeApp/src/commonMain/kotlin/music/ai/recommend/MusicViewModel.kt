@@ -8,12 +8,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import music.ai.recommend.model.Folder
-import music.ai.recommend.model.Song
-import music.ai.recommend.model.Playlist
+import music.ai.recommend.model.*
 import music.ai.recommend.platform.MusicScanner
 import music.ai.recommend.platform.MusicPlayer
+import music.ai.recommend.platform.AiScanner
+import music.ai.recommend.db.getAppDatabase
 import kotlinx.coroutines.withContext
+import aimusic.composeapp.generated.resources.Res
 
 enum class AppSection {
     Folders, Playlists, Settings
@@ -22,9 +23,6 @@ enum class AppSection {
 enum class PlaybackMode {
     RepeatQueue, StopAfterQueue, RepeatOne, StopAfterTrack, Shuffle
 }
-
-data class EqBand(val index: Int, val freq: String, val level: Float)
-data class EqPreset(val name: String, val levels: List<Float>, val isCustom: Boolean = false)
 
 class MusicViewModel : ViewModel() {
     private val _currentSection = MutableStateFlow(AppSection.Folders)
@@ -41,6 +39,8 @@ class MusicViewModel : ViewModel() {
 
     private val scanner = MusicScanner()
     private val player = MusicPlayer()
+    private val aiScanner = AiScanner()
+    private val db = getAppDatabase()
 
     private val _folders = MutableStateFlow<List<Folder>>(emptyList())
     val folders: StateFlow<List<Folder>> = _folders.asStateFlow()
@@ -81,8 +81,8 @@ class MusicViewModel : ViewModel() {
     private val _isAiScanning = MutableStateFlow(false)
     val isAiScanning: StateFlow<Boolean> = _isAiScanning.asStateFlow()
 
-    private val _scannedSongIds = MutableStateFlow<Set<Long>>(emptySet())
-    val scannedSongIds: StateFlow<Set<Long>> = _scannedSongIds.asStateFlow()
+    private val _scannedSongIds = MutableStateFlow<Set<String>>(emptySet())
+    val scannedSongIds: StateFlow<Set<String>> = _scannedSongIds.asStateFlow()
 
     private val _selectedFolder = MutableStateFlow<Folder?>(null)
     val selectedFolder: StateFlow<Folder?> = _selectedFolder.asStateFlow()
@@ -99,8 +99,8 @@ class MusicViewModel : ViewModel() {
     private val _isSearchActive = MutableStateFlow(false)
     val isSearchActive: StateFlow<Boolean> = _isSearchActive.asStateFlow()
 
-    private val _favoriteSongIds = MutableStateFlow<Set<Long>>(emptySet())
-    val favoriteSongIds: StateFlow<Set<Long>> = _favoriteSongIds.asStateFlow()
+    private val _favoriteSongPaths = MutableStateFlow<Set<String>>(emptySet())
+    val favoriteSongPaths: StateFlow<Set<String>> = _favoriteSongPaths.asStateFlow()
 
     private val _selectedPlaylist = MutableStateFlow<Playlist?>(null)
     val selectedPlaylist: StateFlow<Playlist?> = _selectedPlaylist.asStateFlow()
@@ -135,7 +135,72 @@ class MusicViewModel : ViewModel() {
                 next(isAutomatic = true)
             }
         }
-        loadMusic()
+        
+        // Start loading sequence
+        viewModelScope.launch {
+            loadAllPersistedDataSync() // 1. Load settings first
+            loadMusic()                // 2. Then scan music with correct path
+            loadScannedIds()           // 3. Then load AI state
+        }
+    }
+
+    private suspend fun loadAllPersistedDataSync() {
+        val dao = db.musicDao()
+        
+        // 1. Settings
+        dao.loadSettings()?.let { s ->
+            _musicFolderPath.value = s.musicFolderPath
+            _isDarkTheme.value = s.isDarkTheme
+            _backgroundImageUri.value = s.backgroundImageUri
+            _backgroundAlpha.value = s.backgroundAlpha
+            _eqBands.value = _eqBands.value.mapIndexed { i, band ->
+                val level = s.eqLevels.getOrElse(i) { 0f }
+                player.setEqBand(i, level)
+                band.copy(level = level)
+            }
+            _eqPresets.value = _eqPresets.value + s.customEqPresets
+        }
+        
+        // 2. Favorites
+        _favoriteSongPaths.value = dao.loadFavorites()
+    }
+
+
+    private fun saveSettings() {
+        viewModelScope.launch(Dispatchers.Default) {
+            val settings = AppSettings(
+                musicFolderPath = _musicFolderPath.value,
+                isDarkTheme = _isDarkTheme.value,
+                backgroundImageUri = _backgroundImageUri.value,
+                backgroundAlpha = _backgroundAlpha.value,
+                eqLevels = _eqBands.value.map { it.level },
+                customEqPresets = _eqPresets.value.filter { it.isCustom }
+            )
+            db.musicDao().saveSettings(settings)
+        }
+    }
+
+    private fun savePlaylists() {
+        viewModelScope.launch(Dispatchers.Default) {
+            db.musicDao().savePlaylists(_playlists.value)
+        }
+    }
+
+    private fun saveFavorites() {
+        viewModelScope.launch(Dispatchers.Default) {
+            db.musicDao().saveFavorites(_favoriteSongPaths.value)
+        }
+    }
+
+    private fun loadScannedIds() {
+        viewModelScope.launch {
+            try {
+                val paths = db.musicDao().getAllEmbeddings().map { it.path }.toSet()
+                _scannedSongIds.value = paths
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun setSection(section: AppSection) {
@@ -156,6 +221,7 @@ class MusicViewModel : ViewModel() {
         _eqBands.value = _eqBands.value.map { 
             if (it.index == index) it.copy(level = level) else it 
         }
+        saveSettings()
     }
 
     fun applyPreset(preset: EqPreset) {
@@ -165,6 +231,7 @@ class MusicViewModel : ViewModel() {
         _eqBands.value = _eqBands.value.mapIndexed { index, band ->
             band.copy(level = preset.levels.getOrElse(index) { 0f })
         }
+        saveSettings()
     }
 
     fun saveCustomPreset(name: String) {
@@ -172,11 +239,13 @@ class MusicViewModel : ViewModel() {
         val currentLevels = _eqBands.value.map { it.level }
         val newPreset = EqPreset(name, currentLevels, isCustom = true)
         _eqPresets.value = _eqPresets.value + newPreset
+        saveSettings()
     }
 
     fun deletePreset(preset: EqPreset) {
         if (preset.isCustom) {
             _eqPresets.value = _eqPresets.value.filter { it.name != preset.name }
+            saveSettings()
         }
     }
 
@@ -186,6 +255,7 @@ class MusicViewModel : ViewModel() {
 
     fun updateMusicPath(path: String) {
         _musicFolderPath.value = path
+        saveSettings()
         loadMusic()
     }
 
@@ -196,13 +266,15 @@ class MusicViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.Default) {
             try {
                 val path = _musicFolderPath.value
+                println("MusicViewModel: Scanning folder: ${if (path.isEmpty()) "Default (~/Music)" else path}")
                 val scannedFolders = if (path.isEmpty()) scanner.scanMusic() else scanner.scanCustomPath(path)
                 allSongs = scannedFolders.flatMap { it.songs }
                 
                 withContext(Dispatchers.Main) {
                     _folders.value = scannedFolders
                     _isScanning.value = false
-                    println("Found ${scannedFolders.size} folders")
+                    _playlists.value = db.musicDao().loadPlaylists(allSongs)
+                    println("Found ${scannedFolders.size} folders and ${_playlists.value.size} playlists")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -364,6 +436,7 @@ class MusicViewModel : ViewModel() {
     fun createPlaylist(name: String) {
         val newPlaylist = Playlist(id = System.currentTimeMillis(), name = name, songs = emptyList())
         _playlists.value = _playlists.value + newPlaylist
+        savePlaylists()
     }
 
     fun deletePlaylist(playlist: Playlist) {
@@ -371,6 +444,7 @@ class MusicViewModel : ViewModel() {
         if (_selectedPlaylist.value?.id == playlist.id) {
             _selectedPlaylist.value = null
         }
+        savePlaylists()
     }
 
     fun selectPlaylist(playlist: Playlist?) {
@@ -386,6 +460,7 @@ class MusicViewModel : ViewModel() {
         if (_selectedPlaylist.value?.id == playlist.id) {
             _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
         }
+        savePlaylists()
     }
 
     fun removeSongFromPlaylist(playlist: Playlist, song: Song) {
@@ -397,36 +472,53 @@ class MusicViewModel : ViewModel() {
         if (_selectedPlaylist.value?.id == playlist.id) {
             _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
         }
+        savePlaylists()
     }
 
     fun toggleFavorite(song: Song) {
-        val current = _favoriteSongIds.value.toMutableSet()
-        if (current.contains(song.id)) {
-            current.remove(song.id)
+        val current = _favoriteSongPaths.value.toMutableSet()
+        if (current.contains(song.path)) {
+            current.remove(song.path)
         } else {
-            current.add(song.id)
+            current.add(song.path)
         }
-        _favoriteSongIds.value = current
+        _favoriteSongPaths.value = current
+        saveFavorites()
     }
 
-    fun isFavorite(songId: Long): Boolean {
-        return _favoriteSongIds.value.contains(songId)
+    fun isFavorite(songPath: String): Boolean {
+        return _favoriteSongPaths.value.contains(songPath)
     }
 
     fun getFavoriteSongs(): List<Song> {
-        return allSongs.filter { _favoriteSongIds.value.contains(it.id) }
+        return allSongs.filter { _favoriteSongPaths.value.contains(it.path) }
     }
 
     fun setBackgroundImage(uri: String?) {
         _backgroundImageUri.value = uri
+        saveSettings()
     }
 
     fun setBackgroundAlpha(alpha: Float) {
         _backgroundAlpha.value = alpha
+        saveSettings()
     }
 
     fun setDarkTheme(isDark: Boolean) {
         _isDarkTheme.value = isDark
+        saveSettings()
+    }
+
+    private fun formatEtr(seconds: Long): String {
+        if (seconds < 0) return ""
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return when {
+            h > 0 -> "(${h}h ${m}m ${s}s left)"
+            m > 0 -> "(${m}m ${s}s left)"
+            else -> "(${s}s left)"
+        }
     }
 
     fun startAiScan() {
@@ -435,39 +527,44 @@ class MusicViewModel : ViewModel() {
         _aiScanStatus.value = "Starting AI Analysis..."
         
         viewModelScope.launch(Dispatchers.Default) {
-            val songsToScan = allSongs.filter { !scannedSongIds.value.contains(it.id) }
-            songsToScan.forEachIndexed { index, song ->
-                if (!_isAiScanning.value) return@launch
-                
-                withContext(Dispatchers.Main) {
-                    _aiScanProgress.value = (index + 1).toFloat() / songsToScan.size
-                    _aiScanStatus.value = "Analyzing: ${song.title}"
+            try {
+                aiScanner.scanSongs(allSongs) { progress, status, scannedCount, etr ->
+                    viewModelScope.launch {
+                        _aiScanProgress.value = progress
+                        val etrText = formatEtr(etr)
+                        _aiScanStatus.value = if (etrText.isNotEmpty()) "$status $etrText" else status
+                    }
                 }
                 
-                delay(500) 
-                
                 withContext(Dispatchers.Main) {
-                    _scannedSongIds.value = _scannedSongIds.value + song.id
+                    _isAiScanning.value = false
+                    _aiScanStatus.value = "Analysis Complete"
+                    _aiScanProgress.value = 1f
+                    loadScannedIds()
                 }
-            }
-            
-            withContext(Dispatchers.Main) {
-                _isAiScanning.value = false
-                _aiScanStatus.value = "Analysis Complete"
-                _aiScanProgress.value = 1f
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    _isAiScanning.value = false
+                    _aiScanStatus.value = "Error: ${e.message}"
+                }
             }
         }
     }
 
     fun stopAiScan() {
+        aiScanner.stop()
         _isAiScanning.value = false
         _aiScanStatus.value = "Analysis Stopped"
     }
 
     fun clearAiData() {
-        _scannedSongIds.value = emptySet()
-        _aiScanStatus.value = ""
-        _aiScanProgress.value = 0f
+        viewModelScope.launch {
+            db.musicDao().clearAllEmbeddings()
+            _scannedSongIds.value = emptySet()
+            _aiScanStatus.value = "AI Data Cleared"
+            _aiScanProgress.value = 0f
+        }
     }
 
     fun setSearchQuery(query: String) {

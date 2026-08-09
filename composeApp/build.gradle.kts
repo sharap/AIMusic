@@ -33,6 +33,7 @@ kotlin {
                 implementation(libs.kotlinx.coroutines.swing)
                 implementation(libs.vlcj)
                 implementation(libs.jaudiotagger)
+                implementation(libs.onnxruntime.jvm)
             }
         }
     }
@@ -44,7 +45,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "AiMusic"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.2"
         }
     }
 }
