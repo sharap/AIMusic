@@ -28,6 +28,7 @@ fun PlaylistListScreen(
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
     val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     
@@ -74,9 +75,11 @@ fun PlaylistListScreen(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
                                     isFavorite = favoritePaths.contains(song.path),
+                                    isScanned = scannedIds.contains(song.path),
                                     onFavoriteClick = { viewModel.toggleFavorite(song) },
                                     onPlayNext = { viewModel.playNext(song) },
                                     onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                    onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
                                     onDelete = { viewModel.deleteSong(song) },
                                     onShowInfo = { onShowInfo(song) },
                                     onClick = { viewModel.playSong(song, filteredSongs) }
@@ -156,9 +159,11 @@ fun PlaylistListScreen(
                                     song = song,
                                     isActive = song.id == currentSong?.id,
                                     isFavorite = favoritePaths.contains(song.path),
+                                    isScanned = scannedIds.contains(song.path),
                                     onFavoriteClick = { viewModel.toggleFavorite(song) },
                                     onPlayNext = { viewModel.playNext(song) },
                                     onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                    onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
                                     onDelete = { viewModel.deleteSong(song) },
                                     onShowInfo = { onShowInfo(song) },
                                     onClick = { viewModel.playSong(song, songsToShow) }

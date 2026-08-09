@@ -1,71 +1,70 @@
 package music.ai.recommend.ai
 
-import com.sun.jna.Pointer
-import uk.co.caprica.vlcj.factory.MediaPlayerFactory
-import uk.co.caprica.vlcj.player.base.MediaPlayer
-import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
-import uk.co.caprica.vlcj.player.base.callback.AudioCallback
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.io.BufferedInputStream
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-class DesktopAudioDecoder(private val factory: MediaPlayerFactory) {
+class DesktopAudioDecoder {
 
     fun decodeChunk(path: String, durationMs: Long): FloatArray {
-        val decodedSamples = mutableListOf<Float>()
-        val latch = CountDownLatch(1)
-        val targetSize = (48000 * durationMs / 1000).toInt()
+        val targetSamples = (48000 * durationMs / 1000).toInt()
+        val decodedSamples = FloatArray(targetSamples)
         
-        val audioCallback = object : AudioCallback {
-            override fun play(mediaPlayer: MediaPlayer, samples: Pointer, sampleCount: Int, pts: Long) {
-                val byteCount = sampleCount * 2 // 16-bit = 2 bytes
-                val buffer = samples.getByteBuffer(0, byteCount.toLong()).order(ByteOrder.nativeOrder())
-                
-                for (i in 0 until sampleCount) {
-                    if (decodedSamples.size < targetSize) {
-                        val s = buffer.short.toFloat() / 32768f
-                        decodedSamples.add(s)
+        try {
+            // FFmpeg command: 
+            // -ss 20 (start at 20s)
+            // -i [input]
+            // -t 10 (read 10s)
+            // -f s16le (16-bit PCM little endian)
+            // -ac 1 (mono)
+            // -ar 48000 (sample rate)
+            // pipe:1 (output to stdout)
+            
+            val pb = ProcessBuilder(
+                "ffmpeg",
+                "-ss", "20",
+                "-i", path,
+                "-t", (durationMs / 1000.0).toString(),
+                "-f", "s16le",
+                "-ac", "1",
+                "-ar", "48000",
+                "-loglevel", "error",
+                "pipe:1"
+            )
+            
+            val process = pb.start()
+            val inputStream = BufferedInputStream(process.inputStream)
+            
+            val byteBuffer = ByteArray(4096)
+            val shortBuffer = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN)
+            
+            var samplesRead = 0
+            var bytesRead: Int
+            
+            while (inputStream.read(byteBuffer).also { bytesRead = it } != -1 && samplesRead < targetSamples) {
+                for (i in 0 until bytesRead step 2) {
+                    if (samplesRead >= targetSamples) break
+                    
+                    if (i + 1 < bytesRead) {
+                        val low = byteBuffer[i].toInt() and 0xFF
+                        val high = byteBuffer[i + 1].toInt()
+                        val sample = ((high shl 8) or low).toShort()
+                        decodedSamples[samplesRead++] = sample.toFloat() / 32768f
                     }
                 }
-                
-                if (decodedSamples.size >= targetSize) {
-                    mediaPlayer.controls().stop()
-                    latch.countDown()
-                }
             }
-
-            override fun pause(mediaPlayer: MediaPlayer, pts: Long) {}
-            override fun resume(mediaPlayer: MediaPlayer, pts: Long) {}
-            override fun flush(mediaPlayer: MediaPlayer, pts: Long) {}
-            override fun drain(mediaPlayer: MediaPlayer) {}
-            override fun setVolume(volume: Float, mute: Boolean) {}
+            
+            process.destroy() // Ensure process is closed
+            
+            if (samplesRead == 0) return FloatArray(0)
+            
+            // Return actual read samples if less than target
+            return if (samplesRead == targetSamples) decodedSamples else decodedSamples.copyOf(samplesRead)
+            
+        } catch (e: Exception) {
+            println("AudioDecoder: FFmpeg error on $path: ${e.message}")
+            return FloatArray(0)
         }
-
-        val mediaPlayer = factory.mediaPlayers().newMediaPlayer()
-        mediaPlayer.audio().callback("S16N", 48000, 1, audioCallback)
-        
-        // Optimization: Disable audio sync to decode as fast as hardware allows
-        // ":no-audio-sync" and ":no-video-sync" tell VLC not to wait for clock
-        if (mediaPlayer.media().start(path, ":start-time=20.0", ":no-audio-sync", ":no-video-sync")) {
-            try {
-                var retry = 0
-                while (!mediaPlayer.status().isPlaying && retry < 40) {
-                    Thread.sleep(100)
-                    retry++
-                }
-                latch.await(20, TimeUnit.SECONDS)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-        
-        mediaPlayer.release()
-        
-        return decodedSamples.toFloatArray()
-    }
-    
-    fun release() {
-        factory.release()
     }
 }

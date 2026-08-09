@@ -12,6 +12,7 @@ import music.ai.recommend.model.*
 import music.ai.recommend.platform.MusicScanner
 import music.ai.recommend.platform.MusicPlayer
 import music.ai.recommend.platform.AiScanner
+import music.ai.recommend.platform.ClapTextEncoder
 import music.ai.recommend.db.getAppDatabase
 import kotlinx.coroutines.withContext
 import aimusic.composeapp.generated.resources.Res
@@ -40,6 +41,7 @@ class MusicViewModel : ViewModel() {
     private val scanner = MusicScanner()
     private val player = MusicPlayer()
     private val aiScanner = AiScanner()
+    private val textEncoder = ClapTextEncoder()
     private val db = getAppDatabase()
 
     private val _folders = MutableStateFlow<List<Folder>>(emptyList())
@@ -99,6 +101,12 @@ class MusicViewModel : ViewModel() {
     private val _isSearchActive = MutableStateFlow(false)
     val isSearchActive: StateFlow<Boolean> = _isSearchActive.asStateFlow()
 
+    private val _isAiSearchEnabled = MutableStateFlow(false)
+    val isAiSearchEnabled: StateFlow<Boolean> = _isAiSearchEnabled.asStateFlow()
+
+    private val _aiSearchRankings = MutableStateFlow<Map<String, Float>>(emptyMap())
+    val aiSearchRankings: StateFlow<Map<String, Float>> = _aiSearchRankings.asStateFlow()
+
     private val _favoriteSongPaths = MutableStateFlow<Set<String>>(emptySet())
     val favoriteSongPaths: StateFlow<Set<String>> = _favoriteSongPaths.asStateFlow()
 
@@ -107,6 +115,7 @@ class MusicViewModel : ViewModel() {
 
     private var allSongs: List<Song> = emptyList()
     private var progressJob: kotlinx.coroutines.Job? = null
+    private var musicScanJob: kotlinx.coroutines.Job? = null
 
     init {
         // Initialize EQ bands for Desktop VLC (10 bands)
@@ -139,7 +148,7 @@ class MusicViewModel : ViewModel() {
         // Start loading sequence
         viewModelScope.launch {
             loadAllPersistedDataSync() // 1. Load settings first
-            loadMusic()                // 2. Then scan music with correct path
+            loadMusic().join()         // 2. Wait for scan to finish with correct path
             loadScannedIds()           // 3. Then load AI state
         }
     }
@@ -255,34 +264,47 @@ class MusicViewModel : ViewModel() {
 
     fun updateMusicPath(path: String) {
         _musicFolderPath.value = path
+        allSongs = emptyList() // Clear stale data immediately
+        _folders.value = emptyList()
         saveSettings()
         loadMusic()
     }
 
-    fun loadMusic() {
-        if (_isScanning.value) return
+    fun loadMusic(): kotlinx.coroutines.Job {
+        musicScanJob?.cancel() // Cancel existing scan if any
         _isScanning.value = true
         
-        viewModelScope.launch(Dispatchers.Default) {
+        val job = viewModelScope.launch(Dispatchers.Default) {
             try {
                 val path = _musicFolderPath.value
-                println("MusicViewModel: Scanning folder: ${if (path.isEmpty()) "Default (~/Music)" else path}")
+                println("MusicViewModel: Starting scan for folder: ${if (path.isEmpty()) "Default (~/Music)" else path}")
+                
                 val scannedFolders = if (path.isEmpty()) scanner.scanMusic() else scanner.scanCustomPath(path)
-                allSongs = scannedFolders.flatMap { it.songs }
+                val songs = scannedFolders.flatMap { it.songs }
+                
+                synchronized(this@MusicViewModel) {
+                    allSongs = songs
+                }
                 
                 withContext(Dispatchers.Main) {
                     _folders.value = scannedFolders
                     _isScanning.value = false
                     _playlists.value = db.musicDao().loadPlaylists(allSongs)
-                    println("Found ${scannedFolders.size} folders and ${_playlists.value.size} playlists")
+                    println("MusicViewModel: Scan complete. Found ${scannedFolders.size} folders, ${allSongs.size} total songs.")
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                if (e is kotlinx.coroutines.CancellationException) {
+                    println("MusicViewModel: Scan cancelled.")
+                } else {
+                    e.printStackTrace()
+                }
                 withContext(Dispatchers.Main) {
                     _isScanning.value = false
                 }
             }
         }
+        musicScanJob = job
+        return job
     }
 
     fun playSong(song: Song, fromList: List<Song> = emptyList()) {
@@ -523,12 +545,21 @@ class MusicViewModel : ViewModel() {
 
     fun startAiScan() {
         if (_isAiScanning.value) return
+        
+        val songsToScan = synchronized(this) { allSongs.toList() }
+        if (songsToScan.isEmpty()) {
+            _aiScanStatus.value = "No songs found to scan. Please check your music folder."
+            return
+        }
+
+        println("MusicViewModel: Starting AI Scan for ${songsToScan.size} songs. First song path: ${songsToScan.firstOrNull()?.path}")
+
         _isAiScanning.value = true
         _aiScanStatus.value = "Starting AI Analysis..."
         
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                aiScanner.scanSongs(allSongs) { progress, status, scannedCount, etr ->
+                aiScanner.scanSongs(songsToScan) { progress, status, scannedCount, etr ->
                     viewModelScope.launch {
                         _aiScanProgress.value = progress
                         val etrText = formatEtr(etr)
@@ -569,12 +600,99 @@ class MusicViewModel : ViewModel() {
 
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
+        if (_isAiSearchEnabled.value && query.length > 2) {
+            performAiSearch(query)
+        } else {
+            _aiSearchRankings.value = emptyMap()
+        }
+    }
+
+    fun toggleAiSearch() {
+        _isAiSearchEnabled.value = !_isAiSearchEnabled.value
+        if (_isAiSearchEnabled.value) {
+            _selectedFolder.value = null
+            _selectedPlaylist.value = null
+            if (_searchQuery.value.length > 2) {
+                performAiSearch(_searchQuery.value)
+            }
+        } else {
+            _aiSearchRankings.value = emptyMap()
+        }
+    }
+
+    private fun performAiSearch(query: String) {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val queryVector = textEncoder.encode(query) ?: return@launch
+                val embeddings = db.musicDao().getAllEmbeddings()
+                
+                val rankings = embeddings.associate { emb ->
+                    var dotProduct = 0f
+                    for (i in queryVector.indices) {
+                        dotProduct += queryVector[i] * emb.vector[i]
+                    }
+                    emb.path to dotProduct
+                }
+                
+                withContext(Dispatchers.Main) {
+                    _aiSearchRankings.value = rankings
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun setSearchActive(active: Boolean) {
         _isSearchActive.value = active
         if (!active) {
             _searchQuery.value = ""
+            _aiSearchRankings.value = emptyMap()
+            _isAiSearchEnabled.value = false
+        }
+    }
+
+    fun createSmartPlaylist(seedSong: Song) {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val embeddings = db.musicDao().getAllEmbeddings()
+                val seedEmb = embeddings.find { it.path == seedSong.path }?.vector ?: return@launch
+                
+                // Use a map for faster lookup of songs by path
+                val songMap = allSongs.associateBy { it.path }
+                
+                val similarSongs = embeddings
+                    .filter { it.path != seedSong.path && songMap.containsKey(it.path) }
+                    .map { emb ->
+                        // Since vectors are normalized, dot product = cosine similarity
+                        var dotProduct = 0f
+                        for (i in seedEmb.indices) {
+                            dotProduct += seedEmb[i] * emb.vector[i]
+                        }
+                        emb.path to dotProduct
+                    }
+                    .sortedByDescending { it.second }
+                    .take(20)
+                    .mapNotNull { songMap[it.first] }
+                
+                withContext(Dispatchers.Main) {
+                    val currentQueue = _queue.value.toMutableList()
+                    val currentIndex = currentQueue.indexOfFirst { it.path == seedSong.path }
+                    
+                    if (currentIndex != -1) {
+                        // Insert after current song
+                        currentQueue.addAll(currentIndex + 1, similarSongs)
+                        _queue.value = currentQueue
+                    } else {
+                        // Add seed and similar to end
+                        _queue.value = _queue.value + listOf(seedSong) + similarSongs
+                    }
+                    
+                    playSong(seedSong)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 

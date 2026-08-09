@@ -31,9 +31,11 @@ fun SongItem(
     song: Song,
     isActive: Boolean,
     isFavorite: Boolean = false,
+    isScanned: Boolean = false,
     onFavoriteClick: (() -> Unit)? = null,
     onPlayNext: (() -> Unit)? = null,
     onAddToEnd: (() -> Unit)? = null,
+    onSmartPlaylist: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
     onShowInfo: (() -> Unit)? = null,
     onClick: () -> Unit
@@ -172,6 +174,13 @@ fun SongItem(
                 onClick = { onAddToEnd?.invoke(); showMenu = false },
                 leadingIcon = { Icon(Icons.Default.Queue, contentDescription = null) }
             )
+            if (isScanned && onSmartPlaylist != null) {
+                DropdownMenuItem(
+                    text = { Text("Create Smart Playlist", color = MaterialTheme.colorScheme.primary) },
+                    onClick = { onSmartPlaylist.invoke(); showMenu = false },
+                    leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Song Info") },
                 onClick = { onShowInfo?.invoke(); showMenu = false },

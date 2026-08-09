@@ -5,42 +5,34 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
 import music.ai.recommend.db.AppDatabase
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.getAppDatabase
+import music.ai.recommend.db.DesktopMusicDao
 import music.ai.recommend.model.Song
 import java.io.File
 import java.nio.FloatBuffer
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import music.ai.recommend.db.DesktopMusicDao
-import uk.co.caprica.vlcj.factory.MediaPlayerFactory
-
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.seconds
 
 actual class AiScanner actual constructor() {
     private val modelFileName = "audio_model.onnx"
     private val db = getAppDatabase()
     private val audioProcessor = AudioProcessor()
+    private val audioDecoder = DesktopAudioDecoder()
     
-    // Shared VLC factory for all decoders - MUCH faster
-    private val vlcFactory = MediaPlayerFactory()
-    
-    // Limits simultaneous songs dynamically
-    private val semaphore: Semaphore by lazy {
-        val cores = Runtime.getRuntime().availableProcessors()
-        val permits = if (cores > 4) cores - 2 else cores.coerceAtLeast(1)
-        println("AiScanner: Using $permits parallel threads for processing")
-        Semaphore(permits)
-    }
+    // Strict single-threaded mode for absolute stability
+    private val semaphore = Semaphore(1) 
     
     private var ortEnv: OrtEnvironment? = null
     private var ortSession: OrtSession? = null
-    
     private var isStopping = false
 
     private fun loadModel(onStatus: (String) -> Unit) {
@@ -52,51 +44,32 @@ actual class AiScanner actual constructor() {
             
             if (!cacheModelFile.exists()) {
                 onStatus("Extracting AI model...")
-                
                 val paths = listOf(
                     "composeResources/aimusic.composeapp.generated.resources/files/$modelFileName",
                     "composeResources/files/$modelFileName",
                     "files/$modelFileName"
                 )
-
                 var loaded = false
-                val classLoaders = listOf(
-                    javaClass.classLoader,
-                    Thread.currentThread().contextClassLoader
-                )
-
+                val classLoaders = listOf(javaClass.classLoader, Thread.currentThread().contextClassLoader)
                 for (cl in classLoaders) {
                     for (p in paths) {
                         val stream = cl.getResourceAsStream(p) ?: cl.getResourceAsStream("/$p")
                         if (stream != null) {
-                            stream.use { input ->
-                                cacheModelFile.outputStream().use { output ->
-                                    input.copyTo(output)
-                                }
-                            }
-                            loaded = true
-                            break
+                            stream.use { input -> cacheModelFile.outputStream().use { output -> input.copyTo(output) } }
+                            loaded = true; break
                         }
                     }
                     if (loaded) break
                 }
-                
                 if (!loaded) {
-                    val error = "Error: Model file $modelFileName not found in resources!"
-                    onStatus(error)
+                    onStatus("Error: Model file not found!")
                     return
                 }
             }
 
             ortEnv = OrtEnvironment.getEnvironment()
             val options = OrtSession.SessionOptions()
-            
-            // Limit internal threads per execution to allow more parallel song tasks
-            options.setIntraOpNumThreads(2) 
-            options.setInterOpNumThreads(2)
-            
-            val session = ortEnv?.createSession(cacheModelFile.absolutePath, options)
-            ortSession = session
+            ortSession = ortEnv?.createSession(cacheModelFile.absolutePath, options)
             println("AiScanner: Model loaded successfully")
         } catch (e: Exception) {
             e.printStackTrace()
@@ -113,14 +86,22 @@ actual class AiScanner actual constructor() {
         onProgress: (Float, String, Int, Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         isStopping = false
-        
-        loadModel { status ->
-            onProgress(0f, status, 0, -1L)
-        }
+        loadModel { status -> onProgress(0f, status, 0, -1L) }
 
         val dao = db.musicDao()
-        val scannedPathsInDb = try { dao.getAllEmbeddings().map { it.path }.toSet() } catch(e: Exception) { emptySet() }
+        val allEmbeddings = dao.getAllEmbeddings()
         
+        // 1. Cleanup
+        onProgress(0f, "Cleaning up database...", 0, -1L)
+        val pathsToRemove = allEmbeddings.filter { !File(it.path).exists() }.map { it.path }
+        if (pathsToRemove.isNotEmpty()) {
+            pathsToRemove.forEach { (dao as? DesktopMusicDao)?.deleteEmbeddingNoSave(it) }
+            (dao as? DesktopMusicDao)?.forceSave()
+        }
+
+        // 2. Identify remaining
+        val currentEmbeddings = dao.getAllEmbeddings()
+        val scannedPathsInDb = currentEmbeddings.map { it.path }.toSet()
         val songsToProcess = songs.filter { it.path !in scannedPathsInDb }
         val alreadyScannedCount = songs.size - songsToProcess.size
         val totalToProcess = songsToProcess.size
@@ -130,8 +111,7 @@ actual class AiScanner actual constructor() {
             return@withContext
         }
 
-        // Initial progress report
-        onProgress(alreadyScannedCount.toFloat() / songs.size, "Starting...", alreadyScannedCount, -1L)
+        onProgress(alreadyScannedCount.toFloat() / songs.size, "Starting analysis...", alreadyScannedCount, -1L)
 
         val startTime = System.currentTimeMillis()
         val processedInThisSession = AtomicInteger(0)
@@ -139,69 +119,65 @@ actual class AiScanner actual constructor() {
         val jobs = songsToProcess.map { song ->
             async {
                 if (isStopping) return@async
-                
                 semaphore.withPermit {
+                    if (isStopping) return@async
                     try {
-                        val decoder = DesktopAudioDecoder(vlcFactory)
-                        val audioData = decoder.decodeChunk(song.path, 10000)
-                        
-                        if (audioData.isNotEmpty()) {
-                            val features = audioProcessor.extractFeatures(audioData)
-                            val embedding = runInference(features)
-                            dao.insertEmbedding(EmbeddingEntity(song.path, embedding.toList()))
+                        withTimeoutOrNull(45.seconds) {
+                            val currentIdx = processedInThisSession.get()
+                            onProgress(
+                                (alreadyScannedCount + currentIdx).toFloat() / songs.size,
+                                "Analyzing: ${song.title}",
+                                alreadyScannedCount + currentIdx,
+                                -1L
+                            )
+
+                            if (!File(song.path).exists()) return@withTimeoutOrNull
+
+                            val audioData = audioDecoder.decodeChunk(song.path, 10000)
+                            
+                            if (audioData.isNotEmpty()) {
+                                val features = audioProcessor.extractFeatures(audioData)
+                                val embedding = runInference(features)
+                                dao.insertEmbedding(EmbeddingEntity(song.path, embedding.toList()))
+                            }
                         }
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        println("AiScanner: Error on ${song.title}: ${e.message}")
                     } finally {
                         val currentCount = processedInThisSession.incrementAndGet()
                         val currentTime = System.currentTimeMillis()
                         val elapsed = currentTime - startTime
-                        val avgTimePerSong = elapsed / currentCount
+                        val avgTimePerSong = elapsed / currentCount.coerceAtLeast(1)
                         val remainingCount = totalToProcess - currentCount
                         val etrSeconds = (remainingCount * avgTimePerSong) / 1000
                         
-                        val totalProcessed = alreadyScannedCount + currentCount
                         onProgress(
-                            totalProcessed.toFloat() / songs.size,
+                            (alreadyScannedCount + currentCount).toFloat() / songs.size,
                             song.title,
-                            totalProcessed,
+                            alreadyScannedCount + currentCount,
                             etrSeconds
                         )
                         
-                        // Periodic save every 10 songs
-                        if (currentCount % 10 == 0) {
-                            (dao as? DesktopMusicDao)?.forceSave()
-                        }
+                        if (currentCount % 10 == 0) (dao as? DesktopMusicDao)?.forceSave()
                     }
                 }
             }
         }
         
-    jobs.awaitAll()
+        jobs.awaitAll()
         (dao as? DesktopMusicDao)?.forceSave()
-        
-        if (!isStopping) {
-            onProgress(1f, "Complete", songs.size, 0L)
-        }
-    }
-
-    private fun processSong(song: Song): FloatArray {
-        // Not used anymore in parallel mode
-        return FloatArray(512)
+        if (!isStopping) onProgress(1f, "Complete", songs.size, 0L)
     }
 
     private fun runInference(features: FloatArray): FloatArray {
         val session = ortSession ?: throw IllegalStateException("ONNX Session is null")
         val env = ortEnv ?: throw IllegalStateException("ONNX Env is null")
-        
         try {
             val shape = longArrayOf(1, 1, 1001, 64)
-            val tensor = OnnxTensor.createTensor(env, java.nio.FloatBuffer.wrap(features), shape)
-            
+            val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(features), shape)
             val output = session.run(mapOf("input_features" to tensor))
             @Suppress("UNCHECKED_CAST")
             val result = output.get(0).value as Array<FloatArray>
-            
             return normalize(result[0])
         } catch (e: Exception) {
             e.printStackTrace()

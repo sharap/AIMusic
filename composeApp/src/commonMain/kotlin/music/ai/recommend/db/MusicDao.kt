@@ -6,6 +6,7 @@ import music.ai.recommend.model.Playlist
 interface MusicDao {
     suspend fun getAllEmbeddings(): List<EmbeddingEntity>
     suspend fun insertEmbedding(embedding: EmbeddingEntity)
+    suspend fun deleteEmbedding(path: String)
     suspend fun clearAllEmbeddings()
     
     suspend fun saveSettings(settings: AppSettings)

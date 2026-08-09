@@ -68,6 +68,17 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         }
     }
 
+    override suspend fun deleteEmbedding(path: String) {
+        deleteEmbeddingNoSave(path)
+        forceSave()
+    }
+
+    fun deleteEmbeddingNoSave(path: String) {
+        synchronized(cache) {
+            cache.removeAll { it.path == path }
+        }
+    }
+
     override suspend fun clearAllEmbeddings() {
         synchronized(cache) {
             cache.clear()

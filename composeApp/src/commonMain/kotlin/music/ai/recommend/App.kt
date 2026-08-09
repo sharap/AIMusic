@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import music.ai.recommend.ui.theme.AiMusicTheme
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Refresh
 
 import androidx.compose.foundation.rememberScrollbarAdapter
@@ -59,6 +60,7 @@ fun App() {
     }
 
     val folders by viewModel.folders.collectAsState()
+    val scannedIds by viewModel.scannedSongIds.collectAsState()
 // ...
     val isScanning by viewModel.isScanning.collectAsState()
     val selectedFolder by viewModel.selectedFolder.collectAsState()
@@ -201,6 +203,7 @@ fun App() {
                                         currentSection = currentSection,
                                         selectedFolder = selectedFolder,
                                         folders = folders,
+                                        scannedIds = scannedIds,
                                         isScanning = isScanning,
                                         listState = listState,
                                         currentSong = currentSong,
@@ -418,6 +421,7 @@ fun MainContentArea(
     currentSection: AppSection,
     selectedFolder: music.ai.recommend.model.Folder?,
     folders: List<music.ai.recommend.model.Folder>,
+    scannedIds: Set<String>,
     isScanning: Boolean,
     listState: androidx.compose.foundation.lazy.LazyListState,
     currentSong: music.ai.recommend.model.Song?,
@@ -428,6 +432,8 @@ fun MainContentArea(
     val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
+    val isAiSearchEnabled by viewModel.isAiSearchEnabled.collectAsState()
+    val aiSearchRankings by viewModel.aiSearchRankings.collectAsState()
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
 
     Scaffold(
@@ -442,12 +448,21 @@ fun MainContentArea(
                             value = searchQuery,
                             onValueChange = { viewModel.setSearchQuery(it) },
                             modifier = Modifier.fillMaxWidth().focusRequester(searchFocusRequester),
-                            placeholder = { Text("Search...") },
+                            placeholder = { Text(if (isAiSearchEnabled) "AI Search by description..." else "Search...") },
                             singleLine = true,
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent
-                            )
+                            ),
+                            trailingIcon = {
+                                FilterChip(
+                                    selected = isAiSearchEnabled,
+                                    onClick = { viewModel.toggleAiSearch() },
+                                    label = { Text("AI") },
+                                    leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                            }
                         )
                     },
                     navigationIcon = {
@@ -464,6 +479,7 @@ fun MainContentArea(
                     }
                 )
             } else {
+// ...
                 TopAppBar(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                     title = {
@@ -591,21 +607,54 @@ fun MainContentArea(
                                     }
 
                                     // Root view (list of folders)
-                                    val foldersToShow = if (isSearchActive) {
+                                    val foldersToShow = if (isSearchActive && !isAiSearchEnabled) {
                                         folders.filter { it.name.contains(searchQuery, ignoreCase = true) }
                                     } else {
                                         folders
                                     }
 
-                                    items(foldersToShow) { folder ->
-                                        FolderItem(
-                                            folder = folder,
-                                            onAddClick = { onAddSongs(folder.songs) },
-                                            onClick = { 
-                                                viewModel.selectFolder(folder)
-                                                viewModel.setSearchActive(false)
+                                    if (isAiSearchEnabled && searchQuery.length > 2) {
+                                        val allSongs = folders.flatMap { it.songs }
+                                        val rankedSongs = allSongs.mapNotNull { song ->
+                                            aiSearchRankings[song.path]?.let { rank -> song to rank }
+                                        }.sortedByDescending { it.second }
+                                        
+                                        items(rankedSongs) { (song, rank) ->
+                                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.weight(1f)) {
+                                                    SongItem(
+                                                        song = song,
+                                                        isActive = song.id == currentSong?.id,
+                                                        isFavorite = favoritePaths.contains(song.path),
+                                                        isScanned = true,
+                                                        onFavoriteClick = { viewModel.toggleFavorite(song) },
+                                                        onPlayNext = { viewModel.playNext(song) },
+                                                        onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                                        onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
+                                                        onDelete = { viewModel.deleteSong(song) },
+                                                        onShowInfo = { onShowInfo(song) },
+                                                        onClick = { viewModel.playSong(song, rankedSongs.map { it.first }) }
+                                                    )
+                                                }
+                                                Text(
+                                                    "${(rank * 100).toInt()}%", 
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    modifier = Modifier.padding(end = 8.dp),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
                                             }
-                                        )
+                                        }
+                                    } else {
+                                        items(foldersToShow) { folder ->
+                                            FolderItem(
+                                                folder = folder,
+                                                onAddClick = { onAddSongs(folder.songs) },
+                                                onClick = { 
+                                                    viewModel.selectFolder(folder)
+                                                    viewModel.setSearchActive(false)
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                                 VerticalScrollbar(
@@ -638,9 +687,11 @@ fun MainContentArea(
                                                 song = song,
                                                 isActive = song.id == currentSong?.id,
                                                 isFavorite = favoritePaths.contains(song.path),
+                                                isScanned = scannedIds.contains(song.path),
                                                 onFavoriteClick = { viewModel.toggleFavorite(song) },
                                                 onPlayNext = { viewModel.playNext(song) },
                                                 onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                                onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
                                                 onDelete = { viewModel.deleteSong(song) },
                                                 onShowInfo = { onShowInfo(song) },
                                                 onClick = { viewModel.playSong(song, songsToShow) }
