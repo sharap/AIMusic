@@ -3,6 +3,8 @@ package music.ai.recommend
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +15,14 @@ import music.ai.recommend.platform.MusicScanner
 import music.ai.recommend.platform.MusicPlayer
 import music.ai.recommend.platform.AiScanner
 import music.ai.recommend.platform.ClapTextEncoder
+import music.ai.recommend.platform.SmartAlbumBuilder
+import music.ai.recommend.platform.PlaybackRemote
+import music.ai.recommend.platform.RemoteControlService
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
+import music.ai.recommend.ai.SmartAlbum
+import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import kotlinx.coroutines.withContext
 import aimusic.composeapp.generated.resources.Res
@@ -21,11 +31,14 @@ enum class AppSection {
     Folders, Playlists, Settings
 }
 
+/** A track matched by AI search, with the calibrated score the list shows. */
+data class ScoredSong(val song: Song, val score: Float)
+
 enum class PlaybackMode {
     RepeatQueue, StopAfterQueue, RepeatOne, StopAfterTrack, Shuffle
 }
 
-class MusicViewModel : ViewModel() {
+class MusicViewModel : ViewModel(), PlaybackRemote {
     private val _currentSection = MutableStateFlow(AppSection.Folders)
     val currentSection: StateFlow<AppSection> = _currentSection.asStateFlow()
 
@@ -42,6 +55,9 @@ class MusicViewModel : ViewModel() {
     private val player = MusicPlayer()
     private val aiScanner = AiScanner()
     private val textEncoder = ClapTextEncoder()
+    // Shares the ViewModel's encoder: a second one would open its own ~126 MB session.
+    private val smartAlbumBuilder = SmartAlbumBuilder(textEncoder)
+    private val remoteControl = RemoteControlService(this)
     private val db = getAppDatabase()
 
     private val _folders = MutableStateFlow<List<Folder>>(emptyList())
@@ -74,6 +90,11 @@ class MusicViewModel : ViewModel() {
     private val _backgroundAlpha = MutableStateFlow(0.3f)
     val backgroundAlpha: StateFlow<Float> = _backgroundAlpha.asStateFlow()
 
+    private val _playbackStopped = MutableStateFlow(true)
+
+    private val _volumePercent = MutableStateFlow(100)
+    val volume: StateFlow<Int> = _volumePercent.asStateFlow()
+
     private val _aiScanProgress = MutableStateFlow(0f)
     val aiScanProgress: StateFlow<Float> = _aiScanProgress.asStateFlow()
 
@@ -85,6 +106,22 @@ class MusicViewModel : ViewModel() {
 
     private val _scannedSongIds = MutableStateFlow<Set<String>>(emptySet())
     val scannedSongIds: StateFlow<Set<String>> = _scannedSongIds.asStateFlow()
+
+    private val _smartAlbums = MutableStateFlow<List<SmartAlbum>>(emptyList())
+    val smartAlbums: StateFlow<List<SmartAlbum>> = _smartAlbums.asStateFlow()
+
+    private val _smartAlbumsBuilding = MutableStateFlow(false)
+    val smartAlbumsBuilding: StateFlow<Boolean> = _smartAlbumsBuilding.asStateFlow()
+
+    private val _smartAlbumsEpsScale = MutableStateFlow(1f)
+    val smartAlbumsEpsScale: StateFlow<Float> = _smartAlbumsEpsScale.asStateFlow()
+
+    private val _selectedSmartAlbum = MutableStateFlow<SmartAlbum?>(null)
+    val selectedSmartAlbum: StateFlow<SmartAlbum?> = _selectedSmartAlbum.asStateFlow()
+
+    /** Set when embeddings from an older, incorrect analysis had to be discarded on startup. */
+    private val _analysisReset = MutableStateFlow(false)
+    val analysisReset: StateFlow<Boolean> = _analysisReset.asStateFlow()
 
     private val _selectedFolder = MutableStateFlow<Folder?>(null)
     val selectedFolder: StateFlow<Folder?> = _selectedFolder.asStateFlow()
@@ -104,8 +141,10 @@ class MusicViewModel : ViewModel() {
     private val _isAiSearchEnabled = MutableStateFlow(false)
     val isAiSearchEnabled: StateFlow<Boolean> = _isAiSearchEnabled.asStateFlow()
 
-    private val _aiSearchRankings = MutableStateFlow<Map<String, Float>>(emptyMap())
-    val aiSearchRankings: StateFlow<Map<String, Float>> = _aiSearchRankings.asStateFlow()
+    // Ordered, because the displayed score saturates at the top of the range: two strong matches
+    // both show 99% and sorting the UI by that number would put them in an arbitrary order.
+    private val _aiSearchResults = MutableStateFlow<List<ScoredSong>>(emptyList())
+    val aiSearchResults: StateFlow<List<ScoredSong>> = _aiSearchResults.asStateFlow()
 
     private val _favoriteSongPaths = MutableStateFlow<Set<String>>(emptySet())
     val favoriteSongPaths: StateFlow<Set<String>> = _favoriteSongPaths.asStateFlow()
@@ -116,6 +155,11 @@ class MusicViewModel : ViewModel() {
     private var allSongs: List<Song> = emptyList()
     private var progressJob: kotlinx.coroutines.Job? = null
     private var musicScanJob: kotlinx.coroutines.Job? = null
+    private var aiSearchJob: kotlinx.coroutines.Job? = null
+    private var smartAlbumsJob: kotlinx.coroutines.Job? = null
+
+    @Volatile
+    private var stopRequested = false
 
     init {
         // Initialize EQ bands for Desktop VLC (10 bands)
@@ -162,6 +206,11 @@ class MusicViewModel : ViewModel() {
             _isDarkTheme.value = s.isDarkTheme
             _backgroundImageUri.value = s.backgroundImageUri
             _backgroundAlpha.value = s.backgroundAlpha
+            _volumePercent.value = s.volumePercent.coerceIn(0, 100)
+            player.volumePercent = _volumePercent.value
+            _smartAlbumsEpsScale.value = s.smartAlbumsEpsScale.coerceIn(
+                SmartAlbumClustering.MIN_EPS_SCALE, SmartAlbumClustering.MAX_EPS_SCALE
+            )
             _eqBands.value = _eqBands.value.mapIndexed { i, band ->
                 val level = s.eqLevels.getOrElse(i) { 0f }
                 player.setEqBand(i, level)
@@ -183,7 +232,9 @@ class MusicViewModel : ViewModel() {
                 backgroundImageUri = _backgroundImageUri.value,
                 backgroundAlpha = _backgroundAlpha.value,
                 eqLevels = _eqBands.value.map { it.level },
-                customEqPresets = _eqPresets.value.filter { it.isCustom }
+                customEqPresets = _eqPresets.value.filter { it.isCustom },
+                smartAlbumsEpsScale = _smartAlbumsEpsScale.value,
+                volumePercent = _volumePercent.value
             )
             db.musicDao().saveSettings(settings)
         }
@@ -206,6 +257,8 @@ class MusicViewModel : ViewModel() {
             try {
                 val paths = db.musicDao().getAllEmbeddings().map { it.path }.toSet()
                 _scannedSongIds.value = paths
+                _analysisReset.value = db.musicDao().analysisWasReset()
+                refreshSmartAlbums()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -317,6 +370,7 @@ class MusicViewModel : ViewModel() {
         _currentSong.value = song
         player.play(song)
         _isPlaying.value = true
+        _playbackStopped.value = false
         startProgressTracker()
     }
 
@@ -365,6 +419,7 @@ class MusicViewModel : ViewModel() {
     fun resume() {
         player.resume()
         _isPlaying.value = true
+        _playbackStopped.value = false
     }
 
     fun pause() {
@@ -555,6 +610,7 @@ class MusicViewModel : ViewModel() {
         println("MusicViewModel: Starting AI Scan for ${songsToScan.size} songs. First song path: ${songsToScan.firstOrNull()?.path}")
 
         _isAiScanning.value = true
+        stopRequested = false
         _aiScanStatus.value = "Starting AI Analysis..."
         
         viewModelScope.launch(Dispatchers.Default) {
@@ -568,31 +624,50 @@ class MusicViewModel : ViewModel() {
                 }
                 
                 withContext(Dispatchers.Main) {
-                    _isAiScanning.value = false
-                    _aiScanStatus.value = "Analysis Complete"
-                    _aiScanProgress.value = 1f
+                    _aiScanStatus.value = if (stopRequested) "Analysis Stopped" else "Analysis Complete"
+                    // A scan the user stopped has not replaced what the version bump discarded,
+                    // so the notice asking them to rescan still applies.
+                    if (!stopRequested) {
+                        _aiScanProgress.value = 1f
+                        db.musicDao().acknowledgeAnalysisReset()
+                    }
                     loadScannedIds()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
-                    _isAiScanning.value = false
                     _aiScanStatus.value = "Error: ${e.message}"
+                }
+            } finally {
+                // The one place the flag is cleared, so the UI never offers to start a second
+                // scan while the first is still winding down.
+                withContext(NonCancellable + Dispatchers.Main) {
+                    _isAiScanning.value = false
                 }
             }
         }
     }
 
+    /**
+     * Asks the scan to stop and leaves the flag to the scan coroutine.
+     *
+     * Clearing it here put the UI back into "not scanning" while the scanner was still finishing
+     * the track in flight and closing its session, so "Start AI Scan" was live again and a second
+     * scan could be started on top of the first.
+     */
     fun stopAiScan() {
         aiScanner.stop()
-        _isAiScanning.value = false
-        _aiScanStatus.value = "Analysis Stopped"
+        stopRequested = true
+        _aiScanStatus.value = "Stopping…"
     }
 
     fun clearAiData() {
         viewModelScope.launch {
             db.musicDao().clearAllEmbeddings()
             _scannedSongIds.value = emptySet()
+            _analysisReset.value = false
+            _smartAlbums.value = emptyList()
+            _selectedSmartAlbum.value = null
             _aiScanStatus.value = "AI Data Cleared"
             _aiScanProgress.value = 0f
         }
@@ -603,7 +678,7 @@ class MusicViewModel : ViewModel() {
         if (_isAiSearchEnabled.value && query.length > 2) {
             performAiSearch(query)
         } else {
-            _aiSearchRankings.value = emptyMap()
+            _aiSearchResults.value = emptyList()
         }
     }
 
@@ -616,38 +691,142 @@ class MusicViewModel : ViewModel() {
                 performAiSearch(_searchQuery.value)
             }
         } else {
-            _aiSearchRankings.value = emptyMap()
+            _aiSearchResults.value = emptyList()
         }
     }
 
+    /**
+     * CLAP matches for [query] across the whole library.
+     *
+     * Every keystroke cancels the previous search, so the 126 MB text model runs once the typing
+     * pauses rather than once per character, and an earlier query can no longer finish last and
+     * overwrite the results of a later one.
+     */
     private fun performAiSearch(query: String) {
-        viewModelScope.launch(Dispatchers.Default) {
+        aiSearchJob?.cancel()
+        aiSearchJob = viewModelScope.launch(Dispatchers.Default) {
             try {
+                delay(SEARCH_DEBOUNCE_MS)
+
+                // Without a usable query vector every score would be identical noise.
                 val queryVector = textEncoder.encode(query) ?: return@launch
                 val embeddings = db.musicDao().getAllEmbeddings()
-                
-                val rankings = embeddings.associate { emb ->
-                    var dotProduct = 0f
-                    for (i in queryVector.indices) {
-                        dotProduct += queryVector[i] * emb.vector[i]
-                    }
-                    emb.path to dotProduct
+                if (embeddings.isEmpty()) {
+                    withContext(Dispatchers.Main) { _aiSearchResults.value = emptyList() }
+                    return@launch
                 }
-                
+
+                val songsByPath = allSongs.associateBy { it.path }
+                val scored = embeddings.mapNotNull { emb ->
+                    val song = songsByPath[emb.path] ?: return@mapNotNull null
+                    // An embedding of another size is from a different model and cannot be
+                    // compared; indexing into it by the query's length would throw.
+                    if (emb.vector.size != queryVector.size) return@mapNotNull null
+                    song to cosineSimilarity(queryVector, emb.vector)
+                }
+                if (scored.isEmpty()) {
+                    withContext(Dispatchers.Main) { _aiSearchResults.value = emptyList() }
+                    return@launch
+                }
+
+                // Where the bulk of the library sits for this particular query. A fixed threshold
+                // cannot work: the absolute cosine depends on the wording and on what is in the
+                // library, so what marks a match is standing out from the rest. Measured over a
+                // 40-track library the cut lands at 0.40 for "celtic harp music", which that
+                // library has plenty of, and at 0.25 for "hip hop beat with rap vocals", which it
+                // has none of.
+                val mean = scored.sumOf { it.second.toDouble() } / scored.size
+                val deviation = kotlin.math.sqrt(
+                    scored.sumOf { (it.second - mean) * (it.second - mean) } / scored.size
+                )
+                val cut = maxOf(mean + deviation, MIN_SEARCH_SIMILARITY.toDouble())
+
+                val matches = scored
+                    .filter { it.second >= cut }
+                    .sortedByDescending { it.second }
+                    .take(AI_SEARCH_RESULTS)
+                    .map { ScoredSong(it.first, mapSimilarityToDisplay(it.second)) }
+
                 withContext(Dispatchers.Main) {
-                    _aiSearchRankings.value = rankings
+                    _aiSearchResults.value = matches
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
+    /** Both vectors are stored unit-length, so the dot product is already the cosine. */
+    private fun cosineSimilarity(query: FloatArray, stored: List<Float>): Float {
+        var dot = 0f
+        for (i in query.indices) dot += query[i] * stored[i]
+        return dot
+    }
+
+    /**
+     * Turns a text-audio cosine into the percentage the list shows.
+     *
+     * Calibrated for the corrected features: measured over this checkpoint an unrelated track
+     * scores around 0.0-0.17 against a query and a good match 0.45-0.65. Showing the raw cosine
+     * instead reported every unrelated track as a double-digit match.
+     */
+    private fun mapSimilarityToDisplay(rawSimilarity: Float): Float {
+        return when {
+            rawSimilarity >= STRONG_SIMILARITY -> 0.99f
+            rawSimilarity <= MIN_SEARCH_SIMILARITY -> 0f
+            else -> (rawSimilarity - MIN_SEARCH_SIMILARITY) / (STRONG_SIMILARITY - MIN_SEARCH_SIMILARITY)
+        }.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Regroups the library by sound. Cheap when nothing has changed — the builder keeps the last
+     * result under a signature of the analysed tracks — so this can run on every library reload.
+     */
+    fun refreshSmartAlbums(rebuild: Boolean = false) {
+        val library = allSongs
+        if (library.isEmpty()) return
+        smartAlbumsJob?.cancel()
+        smartAlbumsJob = viewModelScope.launch {
+            _smartAlbumsBuilding.value = true
+            try {
+                val built = smartAlbumBuilder.albums(library, _smartAlbumsEpsScale.value, rebuild)
+                _smartAlbums.value = built
+                // The open album is a snapshot; after a rebuild it must point at the new one.
+                _selectedSmartAlbum.value = _selectedSmartAlbum.value?.let { open ->
+                    built.firstOrNull { it.id == open.id }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                if (smartAlbumsJob === kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]) {
+                    _smartAlbumsBuilding.value = false
+                }
+            }
+        }
+    }
+
+    fun setSmartAlbumsEpsScale(scale: Float) {
+        val snapped = (scale.coerceIn(SmartAlbumClustering.MIN_EPS_SCALE, SmartAlbumClustering.MAX_EPS_SCALE) * 20)
+            .let { kotlin.math.round(it) / 20f }
+        if (snapped == _smartAlbumsEpsScale.value) return
+        _smartAlbumsEpsScale.value = snapped
+        saveSettings()
+        refreshSmartAlbums()
+    }
+
+    fun selectSmartAlbum(album: SmartAlbum?) {
+        _selectedSmartAlbum.value = album
+    }
+
     fun setSearchActive(active: Boolean) {
         _isSearchActive.value = active
         if (!active) {
             _searchQuery.value = ""
-            _aiSearchRankings.value = emptyMap()
+            _aiSearchResults.value = emptyList()
             _isAiSearchEnabled.value = false
         }
     }
@@ -662,7 +841,10 @@ class MusicViewModel : ViewModel() {
                 val songMap = allSongs.associateBy { it.path }
                 
                 val similarSongs = embeddings
-                    .filter { it.path != seedSong.path && songMap.containsKey(it.path) }
+                    .filter {
+                        it.path != seedSong.path && songMap.containsKey(it.path) &&
+                            it.vector.size == seedEmb.size
+                    }
                     .map { emb ->
                         // Since vectors are normalized, dot product = cosine similarity
                         var dotProduct = 0f
@@ -696,7 +878,117 @@ class MusicViewModel : ViewModel() {
         }
     }
 
+    private companion object {
+        /** A pause in typing, so the text model runs once per query rather than per character. */
+        const val SEARCH_DEBOUNCE_MS = 250L
+
+        /** Below this a track is not a match for the query under any reading. */
+        const val MIN_SEARCH_SIMILARITY = 0.15f
+
+        /** Where a match is unambiguous, and the displayed score saturates. */
+        const val STRONG_SIMILARITY = 0.45f
+
+        const val AI_SEARCH_RESULTS = 50
+    }
+
+    // ---------------------------------------------------------------- PlaybackRemote
+
+    override val nowPlaying: StateFlow<Song?> get() = currentSong
+    override val playing: StateFlow<Boolean> get() = isPlaying
+    override val stopped: StateFlow<Boolean> = _playbackStopped.asStateFlow()
+    override val positionMs: StateFlow<Long> get() = currentPosition
+    override val durationMs: StateFlow<Long> get() = duration
+    override val volumePercent: StateFlow<Int> get() = volume
+
+    override val canGoNext: StateFlow<Boolean> =
+        _queue.map { it.size > 1 }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    override val canGoPrevious: StateFlow<Boolean> get() = canGoNext
+
+    /** After a stop MPRIS expects Play to start the track again, not to resume a dead player. */
+    override fun remotePlay() {
+        val song = _currentSong.value
+        if (_playbackStopped.value && song != null) playSong(song) else resume()
+    }
+    override fun remotePause() = pause()
+    override fun remotePlayPause() = togglePlayPause()
+    override fun remoteNext() = next()
+    override fun remotePrevious() = previous()
+    override fun remoteSeekBy(offsetMs: Long) = seekRelative(offsetMs)
+    override fun remoteSeekTo(positionMs: Long) = seekTo(positionMs.coerceIn(0, _duration.value))
+
+    override fun remoteStop() {
+        player.stop()
+        _isPlaying.value = false
+        _playbackStopped.value = true
+        _currentPosition.value = 0L
+    }
+
+    override fun remoteSetVolume(percent: Int) = setVolume(percent)
+
+    override fun remoteOpenUri(uri: String): Boolean {
+        val path = when {
+            uri.startsWith("file://") -> runCatching { java.net.URI(uri).path }.getOrNull()
+            uri.startsWith("/") -> uri
+            else -> null
+        } ?: return false
+        // Only tracks the library already knows: playing an arbitrary path would leave the queue,
+        // the favourites and the AI state describing something that is not in the library.
+        val song = allSongs.firstOrNull { it.path == path } ?: return false
+        playSong(song, allSongs)
+        return true
+    }
+
+    /** Raising the window is the host's business; App.kt installs the handler that does it. */
+    var onRaiseRequested: (() -> Unit)? = null
+
+    /**
+     * Publishes playback for external control.
+     *
+     * Called by the host once the ViewModel exists, never from `init`: the remote reads the flows
+     * declared in this section, and a constructor runs property initialisers in declaration order,
+     * so starting it there left those fields null. The resulting NullPointerException happened
+     * inside a coroutine and showed up only as state that silently never reached the bus.
+     */
+    fun startRemoteControl() {
+        remoteControl.start()
+    }
+
+    override fun remoteRaise() {
+        onRaiseRequested?.invoke()
+    }
+
+    /**
+     * Silences playback and restores the previous level on the next press.
+     *
+     * The level is remembered rather than snapped back to a default, so unmuting returns to
+     * whatever the user had set — including a level reached from outside over MPRIS.
+     */
+    fun toggleMute() {
+        val current = _volumePercent.value
+        if (current > 0) {
+            volumeBeforeMute = current
+            setVolume(0)
+        } else {
+            setVolume(volumeBeforeMute.coerceAtLeast(1))
+        }
+    }
+
+    private var volumeBeforeMute = 100
+
+    fun setVolume(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        if (clamped == _volumePercent.value) return
+        player.volumePercent = clamped
+        _volumePercent.value = clamped
+        saveSettings()
+    }
+
     fun release() {
+        remoteControl.stop()
         player.release()
+        // Both hold an ONNX session — ~280 MB for the audio model, ~126 MB for the text one — and
+        // neither is freed by the garbage collector, since the memory is native.
+        aiScanner.release()
+        textEncoder.release()
     }
 }

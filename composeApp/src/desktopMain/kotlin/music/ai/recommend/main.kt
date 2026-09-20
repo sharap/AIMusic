@@ -15,7 +15,13 @@ fun main() {
             title = "AiMusic"
         ) {
             println("Window created")
-            App()
+            App(
+                onRaise = {
+                    window.isMinimized = false
+                    window.toFront()
+                    window.requestFocus()
+                }
+            )
         }
     }
 }

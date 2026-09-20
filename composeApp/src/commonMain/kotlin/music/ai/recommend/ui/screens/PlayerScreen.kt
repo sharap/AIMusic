@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,6 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
 import music.ai.recommend.MusicViewModel
@@ -29,6 +32,7 @@ fun PlayerScreen(viewModel: MusicViewModel) {
     val duration by viewModel.duration.collectAsState()
     val playbackMode by viewModel.playbackMode.collectAsState()
     val favoritePaths by viewModel.favoriteSongPaths.collectAsState()
+    val volume by viewModel.volume.collectAsState()
 
     val song = currentSong
     val isFavorite = song?.let { favoritePaths.contains(it.path) } ?: false
@@ -161,6 +165,42 @@ fun PlayerScreen(viewModel: MusicViewModel) {
                         modifier = Modifier.size(28.dp)
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Reads the same state MPRIS writes, so a change made from the panel widget or a
+            // media key moves this slider too.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { viewModel.toggleMute() }) {
+                    Icon(
+                        imageVector = when {
+                            volume == 0 -> Icons.AutoMirrored.Filled.VolumeOff
+                            volume < 34 -> Icons.AutoMirrored.Filled.VolumeMute
+                            volume < 67 -> Icons.AutoMirrored.Filled.VolumeDown
+                            else -> Icons.AutoMirrored.Filled.VolumeUp
+                        },
+                        contentDescription = if (volume == 0) "Unmute" else "Mute",
+                        tint = if (volume == 0) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = volume.toFloat(),
+                    onValueChange = { viewModel.setVolume(it.roundToInt()) },
+                    valueRange = 0f..100f,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "$volume%",
+                    style = MaterialTheme.typography.labelSmall,
+                    textAlign = TextAlign.End,
+                    // Fixed width, so the slider does not shift as the number gains a digit.
+                    modifier = Modifier.width(40.dp)
+                )
             }
         }
     }

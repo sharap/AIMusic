@@ -14,5 +14,8 @@ data class AppSettings(
     val backgroundImageUri: String? = null,
     val backgroundAlpha: Float = 0.3f,
     val eqLevels: List<Float> = List(10) { 0f },
-    val customEqPresets: List<EqPreset> = emptyList()
+    val customEqPresets: List<EqPreset> = emptyList(),
+    /** Multiplier on the eps smart-album clustering picks for itself; 1 is automatic. */
+    val smartAlbumsEpsScale: Float = 1f,
+    val volumePercent: Int = 100
 )

@@ -34,6 +34,10 @@ kotlin {
                 implementation(libs.vlcj)
                 implementation(libs.jaudiotagger)
                 implementation(libs.onnxruntime.jvm)
+                // MPRIS lives on the session bus; the native-unixsocket transport uses the
+                // JDK's own unix domain sockets, so it needs no JNI and no extra native library.
+                implementation(libs.dbus.java.core)
+                implementation(libs.dbus.java.transport.unixsocket)
             }
         }
     }

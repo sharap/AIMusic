@@ -10,6 +10,11 @@ actual class MusicPlayer actual constructor() {
     actual fun stop() {}
     actual fun seekTo(position: Long) {}
     actual fun setEqBand(index: Int, level: Float) {}
+    // The system mixer owns volume on Android; nothing here to set.
+    actual var volumePercent: Int
+        get() = 100
+        set(value) {}
+
     actual val isPlaying: Boolean = false
     actual val currentPosition: Long = 0L
     actual val duration: Long = 0L

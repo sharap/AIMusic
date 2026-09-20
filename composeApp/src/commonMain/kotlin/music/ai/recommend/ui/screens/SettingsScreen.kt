@@ -19,6 +19,7 @@ import music.ai.recommend.MusicViewModel
 import music.ai.recommend.platform.pickDirectory
 import music.ai.recommend.platform.pickImageFile
 import music.ai.recommend.model.*
+import music.ai.recommend.ai.SmartAlbumClustering
 
 @Composable
 fun SettingsScreen(viewModel: MusicViewModel) {
@@ -27,6 +28,8 @@ fun SettingsScreen(viewModel: MusicViewModel) {
     val aiScanProgress by viewModel.aiScanProgress.collectAsState()
     val aiScanStatus by viewModel.aiScanStatus.collectAsState()
     val scannedSongIds by viewModel.scannedSongIds.collectAsState()
+    val analysisReset by viewModel.analysisReset.collectAsState()
+    val smartAlbumsEpsScale by viewModel.smartAlbumsEpsScale.collectAsState()
     val backgroundAlpha by viewModel.backgroundAlpha.collectAsState()
     val backgroundImageUri by viewModel.backgroundImageUri.collectAsState()
     val isDarkTheme by viewModel.isDarkTheme.collectAsState()
@@ -178,6 +181,17 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
+                    // Without this the library would look as though it had un-analysed itself.
+                    if (analysisReset) {
+                        Text(
+                            "Audio processing was corrected, so the previous analysis no longer " +
+                                "applies. Run the scan again.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
                     if (isAiScanning) {
                         Text(aiScanStatus, style = MaterialTheme.typography.bodyMedium)
                         Spacer(modifier = Modifier.height(8.dp))
@@ -209,6 +223,57 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { viewModel.clearAiData() }) {
                         Text("Clear AI Data", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("Smart Albums", style = MaterialTheme.typography.titleLarge)
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // The radius is chosen per group, in that group's own reduced space, so an
+                    // absolute value would mean nothing across libraries; this scales it.
+                    var dragged by remember(smartAlbumsEpsScale) { mutableStateOf(smartAlbumsEpsScale) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Grouping radius (eps)",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            if (dragged == 1f) "Auto" else "\u00D7${(dragged * 100).toInt() / 100f}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Text(
+                        "Multiplier on the eps chosen automatically. Lower makes albums tighter " +
+                            "and smaller, leaving more tracks out; higher groups more loosely.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = dragged,
+                        onValueChange = { dragged = it },
+                        // Regrouping is seconds of work, so it waits for the drag to end.
+                        onValueChangeFinished = { viewModel.setSmartAlbumsEpsScale(dragged) },
+                        valueRange = SmartAlbumClustering.MIN_EPS_SCALE..SmartAlbumClustering.MAX_EPS_SCALE,
+                        steps = ((SmartAlbumClustering.MAX_EPS_SCALE - SmartAlbumClustering.MIN_EPS_SCALE) * 20).toInt() - 1
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tighter", style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.weight(1f))
+                        if (smartAlbumsEpsScale != 1f) {
+                            TextButton(onClick = { viewModel.setSmartAlbumsEpsScale(1f) }) { Text("Auto") }
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                        Text("Looser", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

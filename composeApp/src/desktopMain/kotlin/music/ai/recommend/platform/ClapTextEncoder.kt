@@ -4,6 +4,8 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import music.ai.recommend.ai.BpeTokenizer
 import java.io.File
@@ -13,9 +15,17 @@ actual class ClapTextEncoder actual constructor() {
     private val modelFileName = "text_model.onnx"
     private val vocabFileName = "vocab.json"
     private val mergesFileName = "merges.txt"
-    
+
+    /** Guards session construction, so several in-flight searches cannot each build a ~126 MB one. */
+    private val mutex = Mutex()
+
+    @Volatile
     private var ortEnv: OrtEnvironment? = null
+
+    @Volatile
     private var ortSession: OrtSession? = null
+
+    @Volatile
     private var tokenizer: BpeTokenizer? = null
 
     private fun loadModel() {
@@ -23,16 +33,17 @@ actual class ClapTextEncoder actual constructor() {
         try {
             val cacheDir = File(System.getProperty("user.home"), ".aimusic/cache")
             if (!cacheDir.exists()) cacheDir.mkdirs()
-            
+
             val cacheModelFile = extractResource(modelFileName, cacheDir) ?: return
             val vocabContent = readResourceText(vocabFileName) ?: return
             val mergesContent = readResourceText(mergesFileName) ?: return
-            
+
             tokenizer = BpeTokenizer(vocabContent, mergesContent)
 
-            ortEnv = OrtEnvironment.getEnvironment()
+            val env = OrtEnvironment.getEnvironment()
             val options = OrtSession.SessionOptions()
-            ortSession = ortEnv?.createSession(cacheModelFile.absolutePath, options)
+            ortEnv = env
+            ortSession = env.createSession(cacheModelFile.absolutePath, options)
             println("ClapTextEncoder: Model and tokenizer loaded successfully")
         } catch (e: Exception) {
             e.printStackTrace()
@@ -42,14 +53,14 @@ actual class ClapTextEncoder actual constructor() {
     private fun extractResource(name: String, targetDir: File): File? {
         val targetFile = File(targetDir, name)
         if (targetFile.exists()) return targetFile
-        
+
         val paths = listOf(
             "composeResources/aimusic.composeapp.generated.resources/files/$name",
             "composeResources/files/$name",
             "files/$name",
             name
         )
-        
+
         for (path in paths) {
             val stream = javaClass.classLoader.getResourceAsStream(path) ?: javaClass.getResourceAsStream("/$path")
             if (stream != null) {
@@ -80,26 +91,43 @@ actual class ClapTextEncoder actual constructor() {
         return null
     }
 
+    /**
+     * Encodes [text] into a unit-length CLAP embedding.
+     *
+     * @return the embedding, or null if the weights are unavailable or inference failed — callers
+     *   should fall back to plain text search rather than scoring against a zero vector, which
+     *   gives a meaningless similarity for every track.
+     */
     actual suspend fun encode(text: String): FloatArray? = withContext(Dispatchers.IO) {
-        loadModel()
+        if (ortSession == null) mutex.withLock { loadModel() }
         val session = ortSession ?: return@withContext null
         val env = ortEnv ?: return@withContext null
         val tok = tokenizer ?: return@withContext null
 
         try {
-            val tokens = tok.tokenize(text, 77)
-            val shape = longArrayOf(1, 77)
-            val tensor = OnnxTensor.createTensor(env, LongBuffer.wrap(tokens), shape)
-            
-            val output = session.run(mapOf("input_ids" to tensor))
-            @Suppress("UNCHECKED_CAST")
-            val result = output.get(0).value as Array<FloatArray>
-            
-            return@withContext normalize(result[0])
+            // The exported graph declares a dynamic sequence_length and takes no attention_mask, so
+            // the tensor is sized to the real token count. Padding it out to a fixed 77 had the
+            // model attend to the padding, and since the pad id was a hard-coded 49407 — the token
+            // `Ġbehav` in this vocabulary — a short query was drowned by ~72 repeats of it.
+            val tokens = tok.tokenize(text, MAX_TOKENS)
+            OnnxTensor.createTensor(env, LongBuffer.wrap(tokens), longArrayOf(1, tokens.size.toLong())).use { tensor ->
+                session.run(mapOf("input_ids" to tensor)).use { output ->
+                    @Suppress("UNCHECKED_CAST")
+                    val result = output.get(0).value as Array<FloatArray>
+                    normalize(result[0])
+                }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
+    }
+
+    actual fun release() {
+        runCatching { ortSession?.close() }
+        ortSession = null
+        ortEnv = null
+        tokenizer = null
     }
 
     private fun normalize(v: FloatArray): FloatArray {
@@ -110,5 +138,9 @@ actual class ClapTextEncoder actual constructor() {
             for (i in v.indices) v[i] /= norm
         }
         return v
+    }
+
+    private companion object {
+        const val MAX_TOKENS = 77
     }
 }

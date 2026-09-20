@@ -2,19 +2,56 @@ package music.ai.recommend.db
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
-import com.google.gson.reflect.TypeToken
 import music.ai.recommend.model.*
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 
+/**
+ * Bumped whenever anything that changes the value of an embedding changes — the feature
+ * extractor, the excerpt selection, the projection.
+ *
+ * Version 2 corrected two of those at once: the log-mel features now match `ClapFeatureExtractor`
+ * (the previous ones used an HTK mel scale from 0 Hz, unnormalised filters on whole-bin edges and
+ * a natural logarithm, which put the 64 mel channels on the wrong frequencies entirely), and the
+ * excerpt is taken from the middle of the track rather than from a fixed 20 s in. Measured over a
+ * 40-track library, the peak similarity of a matching description roughly doubled and genre
+ * matches went from arbitrary to correct, so version 1 embeddings are not worth keeping.
+ *
+ * Smart albums stamp it into their cache signature too: albums built from version 1 embeddings
+ * describe a grouping that no longer exists.
+ */
+internal const val ANALYSIS_VERSION = 2
+
 class DesktopMusicDao(private val baseDir: File) : MusicDao {
-    private val file = File(baseDir, "embeddings.json")
+    private val embeddingsFile = File(baseDir, "embeddings.bin")
+    private val legacyEmbeddingsFile = File(baseDir, "embeddings.json")
     private val settingsFile = File(baseDir, "settings.json")
     private val playlistsDir = File(baseDir, "playlists")
     private val favoritesFile = File(baseDir, "favorites.m3u")
-    
+
     private val gson = Gson()
     private val prettyGson = GsonBuilder().setPrettyPrinting().create()
-    private var cache: MutableList<EmbeddingEntity> = mutableListOf()
+
+    /**
+     * Keyed by path, so replacing a track's embedding is a hash lookup.
+     *
+     * A list meant every insert scanned the whole table to drop the previous row, which over a
+     * 4300-track scan is about nine million comparisons for work a map does in one step. The lock
+     * is a separate object because the cache used to be a reassignable `var`, and synchronising on
+     * something that gets replaced guards nothing once it has been.
+     */
+    private val lock = Any()
+    private val cache = LinkedHashMap<String, EmbeddingEntity>()
+
+    /** The envelope the pre-binary format stored embeddings in. */
+    private class StoredEmbeddings(
+        val analysisVersion: Int = 0,
+        val embeddings: List<EmbeddingEntity>? = null
+    )
+
+    @Volatile
+    private var analysisResetFlag = false
 
     init {
         if (!baseDir.exists()) baseDir.mkdirs()
@@ -23,48 +60,142 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     }
 
     private fun load() {
-        if (file.exists()) {
-            try {
-                val json = file.readText()
-                val type = object : TypeToken<List<EmbeddingEntity>>() {}.type
-                val loaded: List<EmbeddingEntity> = gson.fromJson(json, type)
-                
-                synchronized(cache) {
-                    cache = loaded.toMutableList()
-                }
-                
-                if (cache.size < loaded.size) {
-                    println("DesktopMusicDao: Dropped ${loaded.size - cache.size} legacy embedding entries")
-                    forceSave() // Clean up file immediately
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+        if (embeddingsFile.exists()) {
+            loadBinary()
+            return
         }
+        if (legacyEmbeddingsFile.exists()) loadLegacyJson()
+    }
+
+    private fun loadBinary() {
+        try {
+            DataInputStream(embeddingsFile.inputStream().buffered()).use { input ->
+                if (input.readInt() != MAGIC) {
+                    println("DesktopMusicDao: embeddings.bin is not in the expected format, ignoring it")
+                    return
+                }
+                val formatVersion = input.readInt()
+                if (formatVersion != FORMAT_VERSION) {
+                    println("DesktopMusicDao: unknown storage format $formatVersion, ignoring it")
+                    return
+                }
+                val analysisVersion = input.readInt()
+                val count = input.readInt()
+                if (analysisVersion != ANALYSIS_VERSION) {
+                    discardOutdatedAnalysis(analysisVersion)
+                    return
+                }
+                val loaded = LinkedHashMap<String, EmbeddingEntity>(count * 2)
+                repeat(count) {
+                    val path = input.readUTF()
+                    val dimension = input.readInt()
+                    val vector = ArrayList<Float>(dimension)
+                    repeat(dimension) { vector.add(input.readFloat()) }
+                    loaded[path] = EmbeddingEntity(path, vector)
+                }
+                synchronized(lock) {
+                    cache.clear()
+                    cache.putAll(loaded)
+                }
+            }
+        } catch (e: Exception) {
+            println("DesktopMusicDao: could not read embeddings.bin: ${e.message}")
+        }
+    }
+
+    /**
+     * One-time conversion of the JSON envelope into the binary table.
+     *
+     * The JSON form was pretty-printed floats — 47 MB for 4300 tracks against about 9 MB packed —
+     * so it is rewritten rather than kept. The vectors themselves are unchanged, and the binary
+     * file is only written once it has been read in full, so an interrupted migration costs
+     * nothing.
+     */
+    private fun loadLegacyJson() {
+        try {
+            // An outdated table is thrown away whole, so the format is identified from the first
+            // character rather than by parsing tens of megabytes first and deciding afterwards.
+            val head = legacyEmbeddingsFile.bufferedReader().use { reader ->
+                val buffer = CharArray(HEAD_CHARS)
+                val read = reader.read(buffer)
+                if (read <= 0) "" else String(buffer, 0, read)
+            }
+            when (head.firstOrNull { !it.isWhitespace() }) {
+                null -> return
+                '[' -> {
+                    discardOutdatedAnalysis(1)
+                    legacyEmbeddingsFile.delete()
+                    return
+                }
+            }
+
+            val stored = gson.fromJson(legacyEmbeddingsFile.readText(), StoredEmbeddings::class.java) ?: return
+            if (stored.analysisVersion != ANALYSIS_VERSION) {
+                discardOutdatedAnalysis(stored.analysisVersion)
+                legacyEmbeddingsFile.delete()
+                return
+            }
+            synchronized(lock) {
+                cache.clear()
+                for (entity in stored.embeddings.orEmpty()) cache[entity.path] = entity
+            }
+            forceSave()
+            if (embeddingsFile.exists() && embeddingsFile.length() > 0) {
+                legacyEmbeddingsFile.delete()
+                println("DesktopMusicDao: migrated ${cache.size} embeddings to the binary table")
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Drops embeddings produced by an older analysis.
+     *
+     * They are not merely stale but wrong: mixing them with current ones would give a similarity
+     * space where part of the library sits in the wrong place, and since the scan skips paths it
+     * already has, a rescan would quietly keep every one of them.
+     */
+    private fun discardOutdatedAnalysis(storedVersion: Int) {
+        synchronized(lock) { cache.clear() }
+        analysisResetFlag = true
+        println("DesktopMusicDao: discarded embeddings from analysis version $storedVersion")
+        forceSave()
     }
 
     fun forceSave() {
         try {
-            if (!file.parentFile.exists()) file.parentFile.mkdirs()
-            val dataToSave = synchronized(cache) {
-                prettyGson.toJson(cache)
+            if (!baseDir.exists()) baseDir.mkdirs()
+            val rows = synchronized(lock) { cache.values.toList() }
+            // Written aside and renamed, so an interrupted save cannot truncate the table.
+            val tmp = File(embeddingsFile.path + ".tmp")
+            DataOutputStream(tmp.outputStream().buffered(1 shl 16)).use { out ->
+                out.writeInt(MAGIC)
+                out.writeInt(FORMAT_VERSION)
+                out.writeInt(ANALYSIS_VERSION)
+                out.writeInt(rows.size)
+                for (row in rows) {
+                    out.writeUTF(row.path)
+                    out.writeInt(row.vector.size)
+                    for (x in row.vector) out.writeFloat(x)
+                }
             }
-            file.writeText(dataToSave)
+            if (!tmp.renameTo(embeddingsFile)) {
+                embeddingsFile.delete()
+                tmp.renameTo(embeddingsFile)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
     override suspend fun getAllEmbeddings(): List<EmbeddingEntity> {
-        return synchronized(cache) {
-            cache.toList()
-        }
+        return synchronized(lock) { cache.values.toList() }
     }
 
     override suspend fun insertEmbedding(embedding: EmbeddingEntity) {
-        synchronized(cache) {
-            cache.removeAll { it.path == embedding.path }
-            cache.add(embedding)
+        synchronized(lock) {
+            cache[embedding.path] = embedding
         }
     }
 
@@ -74,16 +205,34 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     }
 
     fun deleteEmbeddingNoSave(path: String) {
-        synchronized(cache) {
-            cache.removeAll { it.path == path }
+        synchronized(lock) {
+            cache.remove(path)
         }
     }
 
     override suspend fun clearAllEmbeddings() {
-        synchronized(cache) {
+        synchronized(lock) {
             cache.clear()
         }
+        analysisResetFlag = false
         forceSave()
+    }
+
+    override suspend fun analysisWasReset(): Boolean = analysisResetFlag
+
+    override suspend fun acknowledgeAnalysisReset() {
+        analysisResetFlag = false
+    }
+
+    private companion object {
+        /** Enough of the legacy file to find its first non-blank character. */
+        const val HEAD_CHARS = 64
+
+        /** "AIME", so a file that is not this table is recognised rather than misparsed. */
+        const val MAGIC = 0x41494D45
+
+        /** How the table is laid out, as opposed to what the vectors in it mean. */
+        const val FORMAT_VERSION = 1
     }
 
     override suspend fun saveSettings(settings: AppSettings) {
@@ -181,4 +330,15 @@ class DesktopAppDatabase : AppDatabase {
     override fun musicDao(): MusicDao = dao
 }
 
-actual fun getAppDatabase(): AppDatabase = DesktopAppDatabase()
+/**
+ * One database per process.
+ *
+ * [DesktopMusicDao] keeps the embeddings table in memory and only reads the file in its
+ * constructor, so a second instance means a second cache: the scanner wrote through its own copy
+ * while the ViewModel kept serving the one it had loaded at startup, which is why a finished scan
+ * left "Analyzed songs" unchanged and AI search empty until the app was restarted. Worse, a save
+ * from the stale cache could overwrite what the scan had just written.
+ */
+private val databaseInstance: AppDatabase by lazy { DesktopAppDatabase() }
+
+actual fun getAppDatabase(): AppDatabase = databaseInstance

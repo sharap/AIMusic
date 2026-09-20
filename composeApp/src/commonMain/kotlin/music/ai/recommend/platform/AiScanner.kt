@@ -8,4 +8,7 @@ expect class AiScanner() {
         onProgress: (Float, String, Int, Long) -> Unit
     )
     fun stop()
+
+    /** Closes the inference session. The audio model is ~280 MB of resident memory. */
+    fun release()
 }

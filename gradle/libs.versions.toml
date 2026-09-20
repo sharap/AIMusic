@@ -20,11 +20,14 @@ adaptive = "1.2.0"
 adaptiveNavigationSuite = "1.4.0"
 kotlinx-coroutines = "1.10.1"
 vlcj = "4.8.2"
+dbusJava = "5.1.1"
 jaudiotagger = "3.0.1"
 
 [libraries]
 jaudiotagger = { group = "net.jthink", name = "jaudiotagger", version = "3.0.1" }
 vlcj = { group = "uk.co.caprica", name = "vlcj", version.ref = "vlcj" }
+dbus-java-core = { group = "com.github.hypfvieh", name = "dbus-java-core", version.ref = "dbusJava" }
+dbus-java-transport-unixsocket = { group = "com.github.hypfvieh", name = "dbus-java-transport-native-unixsocket", version.ref = "dbusJava" }
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }

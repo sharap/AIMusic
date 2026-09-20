@@ -50,9 +50,19 @@ import androidx.compose.foundation.onClick
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App() {
+fun App(
+    /** Brings the window forward; MPRIS clients send Raise when their widget is clicked. */
+    onRaise: () -> Unit = {}
+) {
     val viewModel = remember { MusicViewModel() }
-    
+
+    DisposableEffect(viewModel, onRaise) {
+        viewModel.onRaiseRequested = onRaise
+        // Here rather than in the ViewModel's constructor: by now every field it reads is built.
+        viewModel.startRemoteControl()
+        onDispose { viewModel.onRaiseRequested = null }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             viewModel.release()
@@ -433,7 +443,7 @@ fun MainContentArea(
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isAiSearchEnabled by viewModel.isAiSearchEnabled.collectAsState()
-    val aiSearchRankings by viewModel.aiSearchRankings.collectAsState()
+    val aiSearchResults by viewModel.aiSearchResults.collectAsState()
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
 
     Scaffold(
@@ -614,11 +624,11 @@ fun MainContentArea(
                                     }
 
                                     if (isAiSearchEnabled && searchQuery.length > 2) {
-                                        val allSongs = folders.flatMap { it.songs }
-                                        val rankedSongs = allSongs.mapNotNull { song ->
-                                            aiSearchRankings[song.path]?.let { rank -> song to rank }
-                                        }.sortedByDescending { it.second }
-                                        
+                                        // Already filtered, ranked and capped by the ViewModel:
+                                        // re-sorting here by the displayed percentage would undo
+                                        // the ordering, since strong matches all saturate at 99%.
+                                        val rankedSongs = aiSearchResults
+
                                         items(rankedSongs) { (song, rank) ->
                                             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                                                 Box(modifier = Modifier.weight(1f)) {
@@ -633,7 +643,7 @@ fun MainContentArea(
                                                         onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
                                                         onDelete = { viewModel.deleteSong(song) },
                                                         onShowInfo = { onShowInfo(song) },
-                                                        onClick = { viewModel.playSong(song, rankedSongs.map { it.first }) }
+                                                        onClick = { viewModel.playSong(song, rankedSongs.map { it.song }) }
                                                     )
                                                 }
                                                 Text(

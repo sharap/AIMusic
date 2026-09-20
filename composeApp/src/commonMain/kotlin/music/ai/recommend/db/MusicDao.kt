@@ -8,6 +8,17 @@ interface MusicDao {
     suspend fun insertEmbedding(embedding: EmbeddingEntity)
     suspend fun deleteEmbedding(path: String)
     suspend fun clearAllEmbeddings()
+
+    /**
+     * True when embeddings from an older analysis had to be thrown away on startup.
+     *
+     * The settings screen says so, because otherwise the library would appear to have
+     * un-analysed itself between one launch and the next.
+     */
+    suspend fun analysisWasReset(): Boolean
+
+    /** Clears the notice, once a fresh scan has replaced what was discarded. */
+    suspend fun acknowledgeAnalysisReset()
     
     suspend fun saveSettings(settings: AppSettings)
     suspend fun loadSettings(): AppSettings?

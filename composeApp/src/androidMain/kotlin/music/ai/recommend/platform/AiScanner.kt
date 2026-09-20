@@ -11,4 +11,6 @@ actual class AiScanner actual constructor() {
     }
 
     actual fun stop() {}
+
+    actual fun release() {}
 }

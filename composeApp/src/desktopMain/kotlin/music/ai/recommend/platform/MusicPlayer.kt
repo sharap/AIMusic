@@ -64,6 +64,12 @@ actual class MusicPlayer actual constructor() {
         } catch (e: Exception) {}
     }
 
+    actual var volumePercent: Int
+        get() = mediaPlayer?.audio()?.volume()?.coerceIn(0, 100) ?: 0
+        set(value) {
+            mediaPlayer?.audio()?.setVolume(value.coerceIn(0, 100))
+        }
+
     actual val isPlaying: Boolean
         get() = mediaPlayer?.status()?.isPlaying ?: false
 
