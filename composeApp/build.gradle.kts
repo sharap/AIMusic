@@ -63,7 +63,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "AiMusic"
-            packageVersion = "1.0.2"
+            packageVersion = "1.1.0"
             description = "Music player with CLAP audio search and smart albums"
             vendor = "Nikita"
 
