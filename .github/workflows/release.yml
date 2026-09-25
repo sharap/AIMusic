@@ -54,6 +54,23 @@ jobs:
       - name: Build the package
         run: ./gradlew :composeApp:packageDeb
 
+      # The package is handed to people, and its dependencies are a fact that should be visible
+      # from outside rather than a guess. Doubles as a check: without the alternatives through `|`
+      # the package was built without tools/portable-deb.sh and installs only on the distribution
+      # it was built on.
+      - name: Package dependencies
+        run: |
+          deps=$(dpkg-deb -f composeApp/build/compose/binaries/main/deb/*.deb Depends)
+          echo "::notice title=Package dependencies::$deps"
+          case "$deps" in
+            *"|"*) ;;
+            *) echo "::error::No alternative names in the package: the dependency fix did not run"; exit 1 ;;
+          esac
+          case "$deps" in
+            *libvlc5*) ;;
+            *) echo "::error::libvlc5 missing from the dependencies"; exit 1 ;;
+          esac
+
       # Published next to the package: it is a 170 MB download and worth being able to check.
       - name: Checksum
         working-directory: composeApp/build/compose/binaries/main/deb

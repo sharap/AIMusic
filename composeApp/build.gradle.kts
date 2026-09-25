@@ -90,62 +90,29 @@ compose.desktop {
 }
 
 /**
- * Adds the Debian dependencies the package needs at runtime.
+ * Puts the package's dependencies right once jpackage is done.
  *
- * libvlc is dlopen-ed through JNA rather than linked, and ffmpeg is spawned per track by the AI
- * scan, so neither appears in any dependency scan: without declaring them the package installs
- * cleanly and then silently plays nothing. jpackage can declare them (`--linux-package-deps`) but
- * the Compose DSL exposes no way to pass the flag, so the control file is rewritten in place once
- * jpackage is done.
+ * Two problems, one fix. libVLC is dlopen-ed through JNA and ffmpeg is spawned per track, so
+ * neither appears in any dependency scan and the package would install and then silently play
+ * nothing. And jpackage derives the rest from the build machine, where Ubuntu 24.04 renamed half
+ * of them for the 64-bit time_t transition (libasound2 -> libasound2t64) while Debian 12 kept the
+ * old names — so a package built on one does not install on the other at all.
+ *
+ * The script writes the missing names in and gives every library an alternative through `|`, which
+ * is what dpkg has for exactly this. It rewrites only the control member, so the 170 MB of data is
+ * never unpacked and repacked.
  *
  * In afterEvaluate because the Compose plugin registers its packaging tasks after this script is
- * evaluated. Everything the task action needs is resolved here, at configuration time, and only
- * plain values are captured — a reference to a script-level declaration would make the task
- * unserialisable for the configuration cache.
+ * evaluated.
  */
 afterEvaluate {
-    val debDir = layout.buildDirectory.dir("compose/binaries/main/deb")
-    val workDir = layout.buildDirectory.dir("tmp/debRuntimeDeps")
-    val runtimeDependencies = listOf("libvlc5", "vlc-plugin-base", "ffmpeg")
-
-    tasks.named("packageDeb") {
-        doLast {
-            val debFile = debDir.get().asFile
-                .listFiles { f -> f.extension == "deb" }
-                ?.maxByOrNull { it.lastModified() }
-                ?: error("packageDeb produced no .deb to add dependencies to")
-
-            val work = workDir.get().asFile
-            work.deleteRecursively()
-
-            fun run(vararg command: String) {
-                val process = ProcessBuilder(*command).redirectErrorStream(true).start()
-                val output = process.inputStream.bufferedReader().use { it.readText() }
-                check(process.waitFor() == 0) { "${command.joinToString(" ")} failed:\n$output" }
-            }
-
-            // fakeroot, so the ownership inside the archive survives the unpack and repack.
-            run("fakeroot", "dpkg-deb", "-R", debFile.absolutePath, work.absolutePath)
-
-            val control = File(work, "DEBIAN/control")
-            val lines = control.readLines().toMutableList()
-            val existing = lines.indexOfFirst { it.startsWith("Depends:") }
-            val declared = runtimeDependencies.joinToString(", ")
-            if (existing >= 0) {
-                val current = lines[existing].removePrefix("Depends:").trim()
-                val merged = (current.split(",").map { it.trim() }.filter { it.isNotEmpty() } +
-                    runtimeDependencies).distinct()
-                lines[existing] = "Depends: " + merged.joinToString(", ")
-            } else {
-                // Right after Architecture, where dpkg conventionally puts it.
-                val at = lines.indexOfFirst { it.startsWith("Architecture:") }
-                lines.add(if (at >= 0) at + 1 else lines.size, "Depends: $declared")
-            }
-            control.writeText(lines.joinToString("\n", postfix = "\n"))
-
-            run("fakeroot", "dpkg-deb", "-b", work.absolutePath, debFile.absolutePath)
-            work.deleteRecursively()
-            println("packageDeb: declared Depends: $declared")
-        }
+    val portableDeb = tasks.register<Exec>("portableDeb") {
+        description = "Makes the .deb installable on both Debian and Ubuntu."
+        group = "compose desktop"
+        val binaries = layout.buildDirectory.dir("compose/binaries")
+        commandLine("bash", rootDir.resolve("tools/portable-deb.sh").absolutePath, binaries.get().asFile.absolutePath)
+        onlyIf { binaries.get().asFile.isDirectory }
     }
+
+    tasks.named("packageDeb") { finalizedBy(portableDeb) }
 }
