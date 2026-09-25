@@ -19,6 +19,20 @@ interface MusicDao {
 
     /** Clears the notice, once a fresh scan has replaced what was discarded. */
     suspend fun acknowledgeAnalysisReset()
+
+    /**
+     * The listening history, which the playlist of the day is built from.
+     *
+     * Appended to rather than rewritten: a listen is recorded every few minutes, and rewriting the
+     * whole log each time would be pure waste. Everything stays on this machine.
+     */
+    suspend fun appendPlayEvent(event: PlayEventEntity)
+
+    /** Every recorded listen, oldest first. Pruning keeps this bounded. */
+    suspend fun playEvents(): List<PlayEventEntity>
+
+    /** Drops listens recorded before [cutoff]; they no longer carry weight in the taste profile. */
+    suspend fun prunePlayEvents(cutoff: Long)
     
     suspend fun saveSettings(settings: AppSettings)
     suspend fun loadSettings(): AppSettings?

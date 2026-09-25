@@ -168,6 +168,6 @@ class BpeTokenizer(vocabJson: String, mergesText: String) {
          * flag that not every engine accepts.
          */
         // Raw strings pass \uXXXX through untouched, so the regex engine resolves the escapes.
-        const val WS = """\s   -     　"""
+        const val WS = """\s\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000"""
     }
 }

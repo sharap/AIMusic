@@ -6,6 +6,7 @@ import music.ai.recommend.model.*
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Bumped whenever anything that changes the value of an embedding changes — the feature
@@ -29,6 +30,7 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     private val settingsFile = File(baseDir, "settings.json")
     private val playlistsDir = File(baseDir, "playlists")
     private val favoritesFile = File(baseDir, "favorites.m3u")
+    private val historyFile = File(baseDir, "play_history.bin")
 
     private val gson = Gson()
     private val prettyGson = GsonBuilder().setPrettyPrinting().create()
@@ -42,6 +44,8 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
      * something that gets replaced guards nothing once it has been.
      */
     private val lock = Any()
+    private val historyLock = Any()
+    private var countOnDisk = -1
     private val cache = LinkedHashMap<String, EmbeddingEntity>()
 
     /** The envelope the pre-binary format stored embeddings in. */
@@ -216,6 +220,81 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         }
         analysisResetFlag = false
         forceSave()
+    }
+
+    // ---------------------------------------------------------------- listening history
+
+    /**
+     * An append-only log: one record per finished listen, written as it happens.
+     *
+     * Rewriting a whole table for every track played would be wasteful, and a crash mid-write
+     * would take the history with it. A truncated tail from an interrupted append costs at most
+     * the last listen, because the reader stops at the first short record.
+     */
+    override suspend fun appendPlayEvent(event: PlayEventEntity) {
+        synchronized(historyLock) {
+            try {
+                if (!baseDir.exists()) baseDir.mkdirs()
+                DataOutputStream(FileOutputStream(historyFile, true).buffered()).use { out ->
+                    out.writeUTF(event.path)
+                    out.writeLong(event.playedAt)
+                    out.writeLong(event.playedMs)
+                    out.writeLong(event.durationMs)
+                }
+            } catch (e: Exception) {
+                println("DesktopMusicDao: could not record a listen: ${e.message}")
+            }
+        }
+    }
+
+    override suspend fun playEvents(): List<PlayEventEntity> = synchronized(historyLock) { readPlayEvents() }
+
+    override suspend fun prunePlayEvents(cutoff: Long) {
+        synchronized(historyLock) {
+            val kept = readPlayEvents().filter { it.playedAt >= cutoff }
+            if (kept.size == countOnDisk) return
+            try {
+                val tmp = File(historyFile.path + ".tmp")
+                DataOutputStream(tmp.outputStream().buffered()).use { out ->
+                    for (event in kept) {
+                        out.writeUTF(event.path)
+                        out.writeLong(event.playedAt)
+                        out.writeLong(event.playedMs)
+                        out.writeLong(event.durationMs)
+                    }
+                }
+                if (!tmp.renameTo(historyFile)) {
+                    historyFile.delete()
+                    tmp.renameTo(historyFile)
+                }
+                countOnDisk = kept.size
+            } catch (e: Exception) {
+                println("DesktopMusicDao: could not prune the history: ${e.message}")
+            }
+        }
+    }
+
+    /** Must be called with [historyLock] held. */
+    private fun readPlayEvents(): List<PlayEventEntity> {
+        if (!historyFile.exists()) return emptyList()
+        val events = ArrayList<PlayEventEntity>()
+        try {
+            DataInputStream(historyFile.inputStream().buffered()).use { input ->
+                while (true) {
+                    val path = try {
+                        input.readUTF()
+                    } catch (e: java.io.EOFException) {
+                        break
+                    }
+                    events += PlayEventEntity(path, input.readLong(), input.readLong(), input.readLong())
+                }
+            }
+        } catch (e: Exception) {
+            // A short record at the tail is an interrupted append; everything before it is good.
+            println("DesktopMusicDao: history ends in a partial record, keeping ${events.size} listens")
+        }
+        countOnDisk = events.size
+        return events
     }
 
     override suspend fun analysisWasReset(): Boolean = analysisResetFlag

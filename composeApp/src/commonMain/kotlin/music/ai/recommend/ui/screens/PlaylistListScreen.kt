@@ -35,16 +35,34 @@ fun PlaylistListScreen(
     val smartAlbums by viewModel.smartAlbums.collectAsState()
     val smartAlbumsBuilding by viewModel.smartAlbumsBuilding.collectAsState()
     val selectedSmartAlbum by viewModel.selectedSmartAlbum.collectAsState()
+    val dailyMix by viewModel.dailyMix.collectAsState()
+    val dailyMixBuilding by viewModel.dailyMixBuilding.collectAsState()
+    val dailyMixOpen by viewModel.dailyMixOpen.collectAsState()
     
     var showCreateDialog by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
 
-    if (selectedSmartAlbum != null) {
-        SmartAlbumDetail(
-            album = selectedSmartAlbum!!,
+    if (dailyMixOpen) {
+        TrackListDetail(
+            title = "Daily mix",
+            subtitle = "${dailyMix.size} tracks, picked for today",
+            songs = dailyMix,
             viewModel = viewModel,
             currentSong = currentSong,
             favoritePaths = favoritePaths,
+            onBack = { viewModel.openDailyMix(false) },
+            onShowInfo = onShowInfo
+        )
+    } else if (selectedSmartAlbum != null) {
+        val album = selectedSmartAlbum!!
+        TrackListDetail(
+            title = album.title,
+            subtitle = album.subtitle,
+            songs = album.songs,
+            viewModel = viewModel,
+            currentSong = currentSong,
+            favoritePaths = favoritePaths,
+            onBack = { viewModel.selectSmartAlbum(null) },
             onShowInfo = onShowInfo
         )
     } else if (selectedPlaylist == null) {
@@ -90,6 +108,22 @@ fun PlaylistListScreen(
                     } else {
                         // Nothing to group until some tracks are analysed, so the section
                         // stays out of the way entirely until then.
+                        // Above everything else, because it is the one thing here that changes
+                        // on its own from one day to the next.
+                        if (dailyMix.isNotEmpty() || dailyMixBuilding) {
+                            item(key = "daily_mix") {
+                                DailyMixCard(
+                                    songs = dailyMix,
+                                    building = dailyMixBuilding,
+                                    containsCurrent = currentSong?.let { song ->
+                                        dailyMix.any { it.path == song.path }
+                                    } == true,
+                                    onOpen = { viewModel.openDailyMix(true) },
+                                    onPlay = { viewModel.playDailyMix() },
+                                    onRebuild = { viewModel.refreshDailyMix(rebuild = true) }
+                                )
+                            }
+                        }
                         if (smartAlbums.isNotEmpty() || smartAlbumsBuilding || scannedIds.isNotEmpty()) {
                             item(key = "smart_header") {
                                 Row(
@@ -309,13 +343,19 @@ fun PlaylistListScreen(
     }
 }
 
-/** An album is a grouping, not a collection the user edits, so there is nothing to remove here. */
+/**
+ * A read-only track list with a header, shared by the smart albums and the playlist of the day.
+ * Neither is a collection the user edits, so there is nothing to remove here.
+ */
 @Composable
-private fun SmartAlbumDetail(
-    album: SmartAlbum,
+private fun TrackListDetail(
+    title: String,
+    subtitle: String,
+    songs: List<Song>,
     viewModel: MusicViewModel,
     currentSong: Song?,
     favoritePaths: Set<String>,
+    onBack: () -> Unit,
     onShowInfo: (Song) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -323,22 +363,22 @@ private fun SmartAlbumDetail(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { viewModel.selectSmartAlbum(null) }) {
+            IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(album.title, style = MaterialTheme.typography.headlineMedium)
-                if (album.subtitle.isNotEmpty()) {
+                Text(title, style = MaterialTheme.typography.headlineMedium)
+                if (subtitle.isNotEmpty()) {
                     Text(
-                        album.subtitle,
+                        subtitle,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
             Button(
-                onClick = { viewModel.playSong(album.songs.first(), album.songs) },
-                enabled = album.songs.isNotEmpty()
+                onClick = { viewModel.playSong(songs.first(), songs) },
+                enabled = songs.isNotEmpty()
             ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
                 Text("Play All")
@@ -349,7 +389,7 @@ private fun SmartAlbumDetail(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(16.dp)
         ) {
-            items(album.songs) { song ->
+            items(songs) { song ->
                 SongItem(
                     song = song,
                     isActive = song.id == currentSong?.id,
@@ -361,7 +401,74 @@ private fun SmartAlbumDetail(
                     onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
                     onDelete = { viewModel.deleteSong(song) },
                     onShowInfo = { onShowInfo(song) },
-                    onClick = { viewModel.playSong(song, album.songs) }
+                    onClick = { viewModel.playSong(song, songs) }
+                )
+            }
+        }
+    }
+}
+
+/** The day's playlist, with the controls to play it, reopen it, or ask for another one. */
+@Composable
+private fun DailyMixCard(
+    songs: List<Song>,
+    building: Boolean,
+    containsCurrent: Boolean,
+    onOpen: () -> Unit,
+    onPlay: () -> Unit,
+    onRebuild: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        onClick = onOpen,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Today,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Daily mix", style = MaterialTheme.typography.titleMedium)
+                    if (containsCurrent) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.GraphicEq,
+                            contentDescription = "Now playing",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (building && songs.isEmpty()) "Picking today's tracks..."
+                    else "${songs.size} tracks",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (building) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                IconButton(onClick = onRebuild) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Build another one for today")
+                }
+            }
+            IconButton(onClick = onPlay, enabled = songs.isNotEmpty()) {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = "Play",
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
         }

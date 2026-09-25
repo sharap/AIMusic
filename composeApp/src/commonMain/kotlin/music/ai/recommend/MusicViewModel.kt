@@ -16,6 +16,10 @@ import music.ai.recommend.platform.MusicPlayer
 import music.ai.recommend.platform.AiScanner
 import music.ai.recommend.platform.ClapTextEncoder
 import music.ai.recommend.platform.SmartAlbumBuilder
+import music.ai.recommend.platform.DailyMixBuilder
+import music.ai.recommend.history.PlayEvent
+import music.ai.recommend.history.PlayTracker
+import music.ai.recommend.db.PlayEventEntity
 import music.ai.recommend.platform.PlaybackRemote
 import music.ai.recommend.platform.RemoteControlService
 import kotlinx.coroutines.flow.map
@@ -58,6 +62,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     // Shares the ViewModel's encoder: a second one would open its own ~126 MB session.
     private val smartAlbumBuilder = SmartAlbumBuilder(textEncoder)
     private val remoteControl = RemoteControlService(this)
+    private val dailyMixBuilder = DailyMixBuilder()
+
+    /**
+     * Turns playback into finished listens. The player reports positions; this decides what counts
+     * as a listen and what counts as a skip, which is what the playlist of the day is built from.
+     */
+    private val playTracker = PlayTracker { event -> recordListen(event) }
     private val db = getAppDatabase()
 
     private val _folders = MutableStateFlow<List<Folder>>(emptyList())
@@ -106,6 +117,15 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private val _scannedSongIds = MutableStateFlow<Set<String>>(emptySet())
     val scannedSongIds: StateFlow<Set<String>> = _scannedSongIds.asStateFlow()
+
+    private val _dailyMix = MutableStateFlow<List<Song>>(emptyList())
+    val dailyMix: StateFlow<List<Song>> = _dailyMix.asStateFlow()
+
+    private val _dailyMixBuilding = MutableStateFlow(false)
+    val dailyMixBuilding: StateFlow<Boolean> = _dailyMixBuilding.asStateFlow()
+
+    private val _dailyMixOpen = MutableStateFlow(false)
+    val dailyMixOpen: StateFlow<Boolean> = _dailyMixOpen.asStateFlow()
 
     private val _smartAlbums = MutableStateFlow<List<SmartAlbum>>(emptyList())
     val smartAlbums: StateFlow<List<SmartAlbum>> = _smartAlbums.asStateFlow()
@@ -157,6 +177,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     private var musicScanJob: kotlinx.coroutines.Job? = null
     private var aiSearchJob: kotlinx.coroutines.Job? = null
     private var smartAlbumsJob: kotlinx.coroutines.Job? = null
+    private var dailyMixJob: kotlinx.coroutines.Job? = null
 
     @Volatile
     private var stopRequested = false
@@ -259,6 +280,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 _scannedSongIds.value = paths
                 _analysisReset.value = db.musicDao().analysisWasReset()
                 refreshSmartAlbums()
+                refreshDailyMix()
+                prunePlayHistory()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -371,6 +394,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         player.play(song)
         _isPlaying.value = true
         _playbackStopped.value = false
+        playTracker.started(song.path, song.duration, System.currentTimeMillis())
         startProgressTracker()
     }
 
@@ -492,6 +516,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 if (_isPlaying.value) {
                     _currentPosition.value = player.currentPosition
                     _duration.value = player.duration
+                    playTracker.progress(player.currentPosition, player.duration)
                 }
                 delay(1000)
             }
@@ -818,6 +843,71 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         refreshSmartAlbums()
     }
 
+    /**
+     * Builds today's playlist, then sleeps until midnight and builds the next one.
+     *
+     * @param rebuild asks for a different playlist for today, on the user's request.
+     */
+    fun refreshDailyMix(rebuild: Boolean = false) {
+        val library = allSongs
+        if (library.isEmpty()) return
+        dailyMixJob?.cancel()
+        dailyMixJob = viewModelScope.launch {
+            _dailyMixBuilding.value = true
+            try {
+                val playlist = dailyMixBuilder.playlist(library, _favoriteSongPaths.value, rebuild)
+                _dailyMix.value = playlist.songs
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                if (dailyMixJob === kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]) {
+                    _dailyMixBuilding.value = false
+                }
+            }
+            delay(dailyMixBuilder.millisUntilNextDay())
+            refreshDailyMix()
+        }
+    }
+
+    fun playDailyMix() {
+        val mix = _dailyMix.value
+        if (mix.isNotEmpty()) playSong(mix.first(), mix)
+    }
+
+    fun openDailyMix(open: Boolean) {
+        _dailyMixOpen.value = open
+    }
+
+    /**
+     * Drops listens older than a year, once per launch.
+     *
+     * They carry no weight in the taste profile any more — it looks back ninety days and halves
+     * every three weeks — so keeping them only grows the log.
+     */
+    private fun prunePlayHistory() {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                db.musicDao().prunePlayEvents(System.currentTimeMillis() - HISTORY_KEEP_DAYS * DAY_MS)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun recordListen(event: PlayEvent) {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                db.musicDao().appendPlayEvent(
+                    PlayEventEntity(event.songPath, event.playedAt, event.playedMs, event.durationMs)
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     fun selectSmartAlbum(album: SmartAlbum?) {
         _selectedSmartAlbum.value = album
     }
@@ -889,6 +979,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         const val STRONG_SIMILARITY = 0.45f
 
         const val AI_SEARCH_RESULTS = 50
+
+        /** How long listens are kept at all; the taste profile only looks back ninety days. */
+        const val HISTORY_KEEP_DAYS = 365L
+        const val DAY_MS = 24L * 60 * 60 * 1000
     }
 
     // ---------------------------------------------------------------- PlaybackRemote
@@ -917,6 +1011,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     override fun remoteSeekTo(positionMs: Long) = seekTo(positionMs.coerceIn(0, _duration.value))
 
     override fun remoteStop() {
+        playTracker.finished(System.currentTimeMillis())
         player.stop()
         _isPlaying.value = false
         _playbackStopped.value = true
@@ -984,6 +1079,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     }
 
     fun release() {
+        // A listen in flight when the window closes is still a listen.
+        playTracker.finished(System.currentTimeMillis())
         remoteControl.stop()
         player.release()
         // Both hold an ONNX session — ~280 MB for the audio model, ~126 MB for the text one — and
