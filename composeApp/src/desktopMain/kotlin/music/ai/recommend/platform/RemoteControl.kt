@@ -252,7 +252,9 @@ actual class RemoteControlService actual constructor(private val remote: Playbac
                 "CanRaise" to Variant(true),
                 "HasTrackList" to Variant(false),
                 "Identity" to Variant("AiMusic"),
-                "DesktopEntry" to Variant("aimusic"),
+                // Set by the packaging, which is the only place that knows what the installed
+                // .desktop file is called; a shell uses it to find the app's icon and name.
+                "DesktopEntry" to Variant(System.getProperty("aimusic.desktopEntry") ?: "aimusic"),
                 "SupportedUriSchemes" to Variant(ArrayList(listOf("file")), "as"),
                 "SupportedMimeTypes" to Variant(
                     ArrayList(listOf("audio/mpeg", "audio/flac", "audio/mp4", "audio/ogg", "audio/x-wav")), "as"
