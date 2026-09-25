@@ -1,7 +1,7 @@
 # AiMusic
 
 A local music player for the desktop that finds tracks by what they sound like, not only by what
-their tags say. It is a Compose Multiplatform port of [Aura AI](https://github.com/), the Android
+their tags say. It is a Compose Multiplatform port of [Aura AI](https://github.com/sharap/auraai.git), the Android
 app; the AI pipeline is the same, the platform layer is not.
 
 Nothing leaves the machine. The library, the embeddings and the listening history all stay in
