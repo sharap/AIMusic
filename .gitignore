@@ -8,7 +8,8 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
-/build
+# Every module has one, not just the root — a leading slash would match the root only.
+build/
 /captures
 .externalNativeBuild
 .cxx
