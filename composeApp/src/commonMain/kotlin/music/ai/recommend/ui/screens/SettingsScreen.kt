@@ -29,6 +29,9 @@ fun SettingsScreen(viewModel: MusicViewModel) {
     val aiScanStatus by viewModel.aiScanStatus.collectAsState()
     val scannedSongIds by viewModel.scannedSongIds.collectAsState()
     val analysisReset by viewModel.analysisReset.collectAsState()
+    val modelProgress by viewModel.modelProgress.collectAsState()
+    val modelsReady by viewModel.modelsReady.collectAsState()
+    val modelsPendingBytes by viewModel.modelsPendingBytes.collectAsState()
     val smartAlbumsEpsScale by viewModel.smartAlbumsEpsScale.collectAsState()
     val backgroundAlpha by viewModel.backgroundAlpha.collectAsState()
     val backgroundImageUri by viewModel.backgroundImageUri.collectAsState()
@@ -160,6 +163,69 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             onValueChange = { viewModel.setBackgroundAlpha(it) },
                             valueRange = 0.05f..1f
                         )
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("AI Models", style = MaterialTheme.typography.titleLarge)
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        if (modelsReady) "CLAP weights: ready" else "CLAP weights: not downloaded",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Said plainly, because it is a large download on someone else's connection.
+                    Text(
+                        "The weights are not shipped with the app. They come from Hugging Face " +
+                            "once and are kept in ~/.aimusic/models.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (modelProgress.running) {
+                        Text(
+                            "Downloading ${modelProgress.currentFile ?: ""} " +
+                                "(${modelProgress.bytesDone / (1024 * 1024)} of " +
+                                "${modelProgress.bytesTotal / (1024 * 1024)} MB)",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { modelProgress.fraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        modelProgress.error?.let { error ->
+                            Text(
+                                "Download failed: $error",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!modelsReady) {
+                                Button(onClick = { viewModel.downloadModels() }) {
+                                    Text("Download (${modelsPendingBytes / (1024 * 1024)} MB)")
+                                }
+                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            if (modelsPendingBytes == 0L || modelsReady) {
+                                TextButton(onClick = { viewModel.deleteModels() }) {
+                                    Text("Remove weights", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration.Companion.seconds
 
 actual class AiScanner actual constructor() {
-    private val modelFileName = "audio_model.onnx"
+    private val models = ModelRepository.instance
     private val db = getAppDatabase()
     private val audioProcessor = AudioProcessor()
     private val audioDecoder = DesktopAudioDecoder()
@@ -47,48 +47,29 @@ actual class AiScanner actual constructor() {
     @Volatile
     private var fatalError: String? = null
 
-    private fun loadModel(onStatus: (String) -> Unit): Boolean {
+    private suspend fun loadModel(onStatus: (String) -> Unit): Boolean {
         if (ortSession != null) return true
-        try {
-            val cacheDir = File(System.getProperty("user.home"), ".aimusic/cache")
-            if (!cacheDir.exists()) cacheDir.mkdirs()
-            val cacheModelFile = File(cacheDir, modelFileName)
-
-            if (!cacheModelFile.exists()) {
-                onStatus("Extracting AI model...")
-                val paths = listOf(
-                    "composeResources/aimusic.composeapp.generated.resources/files/$modelFileName",
-                    "composeResources/files/$modelFileName",
-                    "files/$modelFileName"
-                )
-                var loaded = false
-                val classLoaders = listOf(javaClass.classLoader, Thread.currentThread().contextClassLoader)
-                for (cl in classLoaders) {
-                    for (p in paths) {
-                        val stream = cl.getResourceAsStream(p) ?: cl.getResourceAsStream("/$p")
-                        if (stream != null) {
-                            stream.use { input -> cacheModelFile.outputStream().use { output -> input.copyTo(output) } }
-                            loaded = true; break
-                        }
-                    }
-                    if (loaded) break
-                }
-                if (!loaded) {
-                    onStatus("Error: Model file not found!")
-                    return false
-                }
+        // 268 MB over the network the first time; the scan cannot start without it, so the
+        // download is part of starting rather than something the user has to arrange first.
+        if (!models.isAvailable(ModelAsset.AUDIO_MODEL)) {
+            onStatus("Downloading the audio model...")
+            if (!models.ensure(listOf(ModelAsset.AUDIO_MODEL))) {
+                onStatus("Download failed: ${models.progress.value.error ?: "unknown error"}")
+                return false
             }
-
+        }
+        return try {
+            val modelFile = models.localFile(ModelAsset.AUDIO_MODEL)
             val env = OrtEnvironment.getEnvironment()
             val options = OrtSession.SessionOptions()
             ortEnv = env
-            ortSession = env.createSession(cacheModelFile.absolutePath, options)
+            ortSession = env.createSession(modelFile.absolutePath, options)
             println("AiScanner: Model loaded successfully")
-            return true
+            true
         } catch (e: Exception) {
             e.printStackTrace()
             onStatus("Error loading AI model")
-            return false
+            false
         }
     }
 

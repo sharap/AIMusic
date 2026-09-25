@@ -12,7 +12,6 @@ import java.io.File
 import java.nio.LongBuffer
 
 actual class ClapTextEncoder actual constructor() {
-    private val modelFileName = "text_model.onnx"
     private val vocabFileName = "vocab.json"
     private val mergesFileName = "merges.txt"
 
@@ -31,10 +30,11 @@ actual class ClapTextEncoder actual constructor() {
     private fun loadModel() {
         if (ortSession != null) return
         try {
-            val cacheDir = File(System.getProperty("user.home"), ".aimusic/cache")
-            if (!cacheDir.exists()) cacheDir.mkdirs()
+            // The weights are downloaded, not bundled; a caller that has not made sure of that
+            // gets no encoder rather than a half-loaded one.
+            val modelFile = ModelRepository.instance.localFile(ModelAsset.TEXT_MODEL)
+            if (!modelFile.isFile) return
 
-            val cacheModelFile = extractResource(modelFileName, cacheDir) ?: return
             val vocabContent = readResourceText(vocabFileName) ?: return
             val mergesContent = readResourceText(mergesFileName) ?: return
 
@@ -43,36 +43,11 @@ actual class ClapTextEncoder actual constructor() {
             val env = OrtEnvironment.getEnvironment()
             val options = OrtSession.SessionOptions()
             ortEnv = env
-            ortSession = env.createSession(cacheModelFile.absolutePath, options)
+            ortSession = env.createSession(modelFile.absolutePath, options)
             println("ClapTextEncoder: Model and tokenizer loaded successfully")
         } catch (e: Exception) {
             e.printStackTrace()
         }
-    }
-
-    private fun extractResource(name: String, targetDir: File): File? {
-        val targetFile = File(targetDir, name)
-        if (targetFile.exists()) return targetFile
-
-        val paths = listOf(
-            "composeResources/aimusic.composeapp.generated.resources/files/$name",
-            "composeResources/files/$name",
-            "files/$name",
-            name
-        )
-
-        for (path in paths) {
-            val stream = javaClass.classLoader.getResourceAsStream(path) ?: javaClass.getResourceAsStream("/$path")
-            if (stream != null) {
-                stream.use { input ->
-                    targetFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                return targetFile
-            }
-        }
-        return null
     }
 
     private fun readResourceText(name: String): String? {
@@ -98,7 +73,11 @@ actual class ClapTextEncoder actual constructor() {
      *   should fall back to plain text search rather than scoring against a zero vector, which
      *   gives a meaningless similarity for every track.
      */
+    /** True when encoding would need a download first. */
+    fun needsDownload(): Boolean = !ModelRepository.instance.isAvailable(ModelAsset.TEXT_MODEL)
+
     actual suspend fun encode(text: String): FloatArray? = withContext(Dispatchers.IO) {
+        if (needsDownload()) return@withContext null
         if (ortSession == null) mutex.withLock { loadModel() }
         val session = ortSession ?: return@withContext null
         val env = ortEnv ?: return@withContext null

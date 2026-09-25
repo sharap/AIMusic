@@ -17,6 +17,8 @@ import music.ai.recommend.platform.AiScanner
 import music.ai.recommend.platform.ClapTextEncoder
 import music.ai.recommend.platform.SmartAlbumBuilder
 import music.ai.recommend.platform.DailyMixBuilder
+import music.ai.recommend.platform.ModelDownloader
+import music.ai.recommend.platform.ModelProgress
 import music.ai.recommend.history.PlayEvent
 import music.ai.recommend.history.PlayTracker
 import music.ai.recommend.db.PlayEventEntity
@@ -63,6 +65,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     private val smartAlbumBuilder = SmartAlbumBuilder(textEncoder)
     private val remoteControl = RemoteControlService(this)
     private val dailyMixBuilder = DailyMixBuilder()
+    private val models = ModelDownloader()
 
     /**
      * Turns playback into finished listens. The player reports positions; this decides what counts
@@ -117,6 +120,14 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private val _scannedSongIds = MutableStateFlow<Set<String>>(emptySet())
     val scannedSongIds: StateFlow<Set<String>> = _scannedSongIds.asStateFlow()
+
+    val modelProgress: StateFlow<ModelProgress> = models.progress
+
+    private val _modelsReady = MutableStateFlow(false)
+    val modelsReady: StateFlow<Boolean> = _modelsReady.asStateFlow()
+
+    private val _modelsPendingBytes = MutableStateFlow(0L)
+    val modelsPendingBytes: StateFlow<Long> = _modelsPendingBytes.asStateFlow()
 
     private val _dailyMix = MutableStateFlow<List<Song>>(emptyList())
     val dailyMix: StateFlow<List<Song>> = _dailyMix.asStateFlow()
@@ -282,6 +293,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 refreshSmartAlbums()
                 refreshDailyMix()
                 prunePlayHistory()
+                refreshModelState()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -869,6 +881,29 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             delay(dailyMixBuilder.millisUntilNextDay())
             refreshDailyMix()
         }
+    }
+
+    /** Fetches the CLAP weights, which are not shipped with the source. */
+    fun downloadModels() {
+        viewModelScope.launch {
+            models.ensureAll()
+            refreshModelState()
+            // AI search and the album names both need the text model; with it here they work now.
+            refreshSmartAlbums()
+        }
+    }
+
+    fun deleteModels() {
+        viewModelScope.launch {
+            val freed = models.deleteDownloaded()
+            refreshModelState()
+            _aiScanStatus.value = "Removed ${freed / (1024 * 1024)} MB of model weights"
+        }
+    }
+
+    private fun refreshModelState() {
+        _modelsReady.value = models.audioModelReady() && models.textModelReady()
+        _modelsPendingBytes.value = models.pendingBytes()
     }
 
     fun playDailyMix() {

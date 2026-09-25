@@ -23,5 +23,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "AiMusic"
-// include(":app")
+// The Android version lives in its own repository (Aura AI); this one is desktop only.
 include(":composeApp")

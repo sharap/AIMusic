@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# CLAP weights: 408 MB, fetched from Hugging Face on first use and kept in ~/.aimusic/models.
+# Too large for a git repository, and not this project's to redistribute.
+*.onnx
+
+# JVM crash dumps
+hs_err_pid*.log
+replay_pid*.log
