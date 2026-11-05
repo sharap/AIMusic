@@ -37,6 +37,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
     val backgroundImageUri by viewModel.backgroundImageUri.collectAsState()
     val isDarkTheme by viewModel.isDarkTheme.collectAsState()
     val musicFolderPath by viewModel.musicFolderPath.collectAsState()
+    val syncSummary by viewModel.syncSummary.collectAsState()
     val eqBands by viewModel.eqBands.collectAsState()
     val eqPresets by viewModel.eqPresets.collectAsState()
 
@@ -340,6 +341,79 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             Spacer(modifier = Modifier.weight(1f))
                         }
                         Text("Looser", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("Sync", style = MaterialTheme.typography.titleLarge)
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Shared folder", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                syncSummary.folder ?: "Not set up",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                // What this is for, since a folder on its own explains nothing:
+                                // the two apps leave files for each other in it and never talk.
+                                "Listening history is exchanged through a folder something else " +
+                                    "keeps in step — Syncthing, a network share, a stick.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Button(onClick = {
+                            val path = pickDirectory()
+                            if (path != null) viewModel.setSyncFolder(path)
+                        }) {
+                            Text(if (syncSummary.folder == null) "Choose" else "Change")
+                        }
+                    }
+
+                    if (syncSummary.folder != null) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider(modifier = Modifier.graphicsLayer { alpha = 0.1f })
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("This machine: ${syncSummary.deviceId}", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    if (syncSummary.lastRunAt == 0L) "Not run yet"
+                                    else "Sent ${syncSummary.sent}, taken in ${syncSummary.takenIn}" +
+                                        if (syncSummary.waiting > 0) ", ${syncSummary.waiting} waiting for their tracks" else "",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            if (syncSummary.busy) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            } else {
+                                IconButton(onClick = { viewModel.syncNow() }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = { viewModel.forgetSyncFolder() }) {
+                            Text("Forget this folder", color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }

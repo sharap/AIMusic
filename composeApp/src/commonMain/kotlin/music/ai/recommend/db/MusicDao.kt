@@ -40,8 +40,11 @@ interface MusicDao {
      *
      * Kept apart from [appendPlayEvent] by [PlayEventEntity.deviceId], which is what stops them
      * being sent back out as this machine's own.
+     *
+     * @return how many were stored. Zero means none were, and the caller must then not treat the
+     *   batch as taken in — it will be offered again.
      */
-    suspend fun appendPlayEvents(events: List<PlayEventEntity>)
+    suspend fun appendPlayEvents(events: List<PlayEventEntity>): Int
 
     /**
      * This machine's own listens past [afterId], oldest first, for the sync outbox. At most [limit]

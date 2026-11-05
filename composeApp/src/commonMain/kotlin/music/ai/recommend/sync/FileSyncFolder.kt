@@ -18,6 +18,10 @@ import java.io.IOException
  *
  * Reading still takes both shapes, because the device on the other side may be a phone whose
  * provider could not append.
+ *
+ * This one is not a copy. Most of this package is shared with the Android app line for line, and
+ * this is the file that may not be: it is how *this* platform reaches a folder, and the phone's
+ * answer to the same question is `SafSyncFolder`.
  */
 class FileSyncFolder(
     /**

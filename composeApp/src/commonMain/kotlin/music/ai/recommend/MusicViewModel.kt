@@ -30,6 +30,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import music.ai.recommend.ai.SmartAlbum
 import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
+import music.ai.recommend.sync.FileSyncFolder
+import music.ai.recommend.sync.PlayLogStore
+import music.ai.recommend.sync.SyncCoordinator
+import music.ai.recommend.sync.SyncFolder
+import music.ai.recommend.sync.SyncIdentity
+import music.ai.recommend.sync.SyncState
 import kotlinx.coroutines.withContext
 import aimusic.composeapp.generated.resources.Res
 
@@ -193,6 +199,38 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     @Volatile
     private var stopRequested = false
 
+    // ---------------------------------------------------------------------------- sync
+    //
+    // Declared above `init` rather than beside the functions that use them, further down. Kotlin
+    // initialises properties in declaration order and runs `init` among them, so a flow declared
+    // below an init block that reads it is still null when it is read. On the phone that came out
+    // as an app which would not open at all, and this is the same language.
+
+    /** What the settings screen shows about sync, and all it needs to know. */
+    data class SyncSummary(
+        /** The folder as a person would recognise it, or null when none has been chosen. */
+        val folder: String? = null,
+        /** The first characters of this device's id, enough to tell two devices apart by eye. */
+        val deviceId: String = "",
+        val sent: Int = 0,
+        val takenIn: Int = 0,
+        /** Listens about tracks this library has not got yet; they wait rather than being lost. */
+        val waiting: Int = 0,
+        val busy: Boolean = false,
+        val lastRunAt: Long = 0L
+    )
+
+    private val _syncSummary = MutableStateFlow(SyncSummary())
+    val syncSummary: StateFlow<SyncSummary> = _syncSummary.asStateFlow()
+
+    private val _syncFolderPath = MutableStateFlow("")
+    val syncFolderPath: StateFlow<String> = _syncFolderPath.asStateFlow()
+
+    /** Sync's own files — the device id and what it remembers between runs — beside the database. */
+    private val syncDirectory by lazy { java.io.File(db.dataDirectory(), "sync") }
+
+    private var syncCoordinator: SyncCoordinator<String>? = null
+
     init {
         // Initialize EQ bands for Desktop VLC (10 bands)
         val freqs = listOf("60Hz", "170Hz", "310Hz", "600Hz", "1kHz", "3kHz", "6kHz", "12kHz", "14kHz", "16kHz")
@@ -221,6 +259,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             }
         }
         
+        observeSync()
+
         // Start loading sequence
         viewModelScope.launch {
             loadAllPersistedDataSync() // 1. Load settings first
@@ -239,6 +279,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _backgroundImageUri.value = s.backgroundImageUri
             _backgroundAlpha.value = s.backgroundAlpha
             _volumePercent.value = s.volumePercent.coerceIn(0, 100)
+            _syncFolderPath.value = s.syncFolderPath
             player.volumePercent = _volumePercent.value
             _smartAlbumsEpsScale.value = s.smartAlbumsEpsScale.coerceIn(
                 SmartAlbumClustering.MIN_EPS_SCALE, SmartAlbumClustering.MAX_EPS_SCALE
@@ -253,6 +294,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         
         // 2. Favorites
         _favoriteSongPaths.value = dao.loadFavorites()
+
+        // Said again now that the chosen folder is known: the first call ran before settings were
+        // read, when there was nothing to say.
+        refreshSyncSummary()
     }
 
 
@@ -266,7 +311,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 eqLevels = _eqBands.value.map { it.level },
                 customEqPresets = _eqPresets.value.filter { it.isCustom },
                 smartAlbumsEpsScale = _smartAlbumsEpsScale.value,
-                volumePercent = _volumePercent.value
+                volumePercent = _volumePercent.value,
+                syncFolderPath = _syncFolderPath.value
             )
             db.musicDao().saveSettings(settings)
         }
@@ -940,8 +986,108 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+            // Offered to the outbox, which decides whether it is yet worth touching the folder.
+            // After the listen is stored, not before: the outbox's watermark is a row number, and
+            // a row that is not there yet cannot be described.
+            runCatching { coordinator()?.push(nowMs()) }
         }
     }
+
+    // ---------------------------------------------------------------------------- sync
+
+    /** The folder itself, rebuilt whenever the choice changes and null until one is made. */
+    private fun syncFolder(): SyncFolder? {
+        val path = _syncFolderPath.value
+        if (path.isEmpty()) return null
+        val deviceId = syncDeviceId() ?: return null
+        // Looked up afresh on every pass: a folder on a drive that has been unplugged, or that
+        // Syncthing has not recreated yet, is a null rather than a handle that means nothing.
+        return FileSyncFolder({ java.io.File(path).takeIf { it.isDirectory } }, deviceId)
+    }
+
+    private fun syncDeviceId(): String? =
+        SyncIdentity.loadOrCreate(java.io.File(syncDirectory, "device-id"))
+
+    private fun coordinator(): SyncCoordinator<String>? {
+        syncCoordinator?.let { return it }
+        val deviceId = syncDeviceId() ?: return null
+        val state = SyncState.load(java.io.File(syncDirectory, "state.json"))
+        return SyncCoordinator(
+            deviceId = deviceId,
+            state = state,
+            store = PlayLogStore(db.musicDao(), { allSongs }, HISTORY_KEEP_DAYS),
+            folder = { syncFolder() },
+            keepDays = HISTORY_KEEP_DAYS.toInt(),
+            note = { println("Sync: $it") }
+        ).also { syncCoordinator = it }
+    }
+
+    /**
+     * The two moments worth reacting to, which are the same two the phone reacts to.
+     *
+     * Every finished listen is offered to the outbox, which writes only when it judges it worth
+     * touching the folder — about twice an hour rather than once a track, because on the other end
+     * of this folder is a phone, and every change to it is a radio wake-up there. And when playback
+     * stops, whatever is waiting goes out at once: that is the end of a listening session, and the
+     * next flush might otherwise be a long way off.
+     */
+    private fun observeSync() {
+        viewModelScope.launch {
+            isPlaying.collect { playing ->
+                if (!playing) runCatching { coordinator()?.push(nowMs(), force = true) }
+            }
+        }
+        refreshSyncSummary()
+    }
+
+    /** Takes the folder the owner picked. */
+    fun setSyncFolder(path: String?) {
+        if (path.isNullOrEmpty()) return
+        _syncFolderPath.value = path
+        syncCoordinator = null
+        saveSettings()
+        refreshSyncSummary()
+        syncNow()
+    }
+
+    fun forgetSyncFolder() {
+        _syncFolderPath.value = ""
+        syncCoordinator = null
+        saveSettings()
+        refreshSyncSummary()
+    }
+
+    /** Sends what is waiting and reads what has arrived. Also what the settings screen asks for. */
+    fun syncNow() {
+        if (_syncSummary.value.busy) return
+        _syncSummary.value = _syncSummary.value.copy(busy = true)
+        viewModelScope.launch(Dispatchers.Default) {
+            val now = nowMs()
+            val sent = runCatching { coordinator()?.push(now, force = true)?.written ?: 0 }
+                .getOrElse { println("Sync: could not write the history out: $it"); 0 }
+            val pulled = runCatching { coordinator()?.pull(now) }
+                .getOrElse { println("Sync: could not read the history in: $it"); null }
+            _syncSummary.value = _syncSummary.value.copy(
+                sent = sent,
+                takenIn = pulled?.takenIn ?: 0,
+                waiting = pulled?.waiting ?: 0,
+                busy = false,
+                lastRunAt = now
+            )
+            // Listens taken in change what counts as recently played, which the daily mix uses.
+            if ((pulled?.takenIn ?: 0) > 0) refreshDailyMix()
+        }
+    }
+
+    private fun refreshSyncSummary() {
+        val path = _syncFolderPath.value
+        _syncSummary.value = _syncSummary.value.copy(
+            folder = path.ifEmpty { null },
+            deviceId = if (path.isEmpty()) "" else syncDeviceId().orEmpty().take(8)
+        )
+    }
+
+    private fun nowMs(): Long = System.currentTimeMillis()
 
     fun selectSmartAlbum(album: SmartAlbum?) {
         _selectedSmartAlbum.value = album

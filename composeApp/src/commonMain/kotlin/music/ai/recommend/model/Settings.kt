@@ -17,5 +17,7 @@ data class AppSettings(
     val customEqPresets: List<EqPreset> = emptyList(),
     /** Multiplier on the eps smart-album clustering picks for itself; 1 is automatic. */
     val smartAlbumsEpsScale: Float = 1f,
-    val volumePercent: Int = 100
+    val volumePercent: Int = 100,
+    /** The folder listening history is exchanged through; empty when sync is not set up. */
+    val syncFolderPath: String = ""
 )

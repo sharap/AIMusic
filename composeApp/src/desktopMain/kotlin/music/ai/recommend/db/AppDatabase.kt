@@ -256,16 +256,18 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
      * with sync, so a log written before it is in the older shape and is converted once — see
      * [readPlayEvents].
      */
-    override suspend fun appendPlayEvent(event: PlayEventEntity) = appendPlayEvents(listOf(event))
+    override suspend fun appendPlayEvent(event: PlayEventEntity) {
+        appendPlayEvents(listOf(event))
+    }
 
-    override suspend fun appendPlayEvents(events: List<PlayEventEntity>) {
-        if (events.isEmpty()) return
+    override suspend fun appendPlayEvents(events: List<PlayEventEntity>): Int {
+        if (events.isEmpty()) return 0
         synchronized(historyLock) {
             if (nextId <= 0) historyNow()
             // A log this build must not write to: either a newer version wrote it, or it is still
             // in the older shape because converting it failed. Appending a numbered record to an
             // unnumbered file would leave a log that neither shape can read.
-            if (historyIsForeign || historyIsLegacy) return
+            if (historyIsForeign || historyIsLegacy) return 0
             try {
                 if (!baseDir.exists()) baseDir.mkdirs()
                 val fresh = !historyFile.exists() || historyFile.length() == 0L
@@ -274,8 +276,13 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     for (event in events) writeRecord(out, event.copy(id = nextId++))
                 }
                 if (countOnDisk >= 0) countOnDisk += events.size
+                return events.size
             } catch (e: Exception) {
+                // Whatever got through is a short record at the tail at worst, which the reader
+                // steps over. Saying nothing was stored is the safe answer: a batch offered twice
+                // is turned away by the merge, a batch marked stored and lost is gone.
                 println("DesktopMusicDao: could not record ${events.size} listens: ${e.message}")
+                return 0
             }
         }
     }
@@ -572,6 +579,8 @@ class DesktopAppDatabase : AppDatabase {
     private val dao = DesktopMusicDao(baseDir)
     
     override fun musicDao(): MusicDao = dao
+
+    override fun dataDirectory(): String = baseDir.path
 }
 
 /**
