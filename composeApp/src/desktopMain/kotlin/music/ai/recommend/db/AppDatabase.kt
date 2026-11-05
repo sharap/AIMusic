@@ -8,28 +8,8 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
-/**
- * Bumped whenever anything that changes the value of an embedding changes — the feature
- * extractor, the excerpt selection, the projection.
- *
- * Version 2 corrected two of those at once: the log-mel features now match `ClapFeatureExtractor`
- * (the previous ones used an HTK mel scale from 0 Hz, unnormalised filters on whole-bin edges and
- * a natural logarithm, which put the 64 mel channels on the wrong frequencies entirely), and the
- * excerpt is taken from the middle of the track rather than from a fixed 20 s in. Measured over a
- * 40-track library, the peak similarity of a matching description roughly doubled and genre
- * matches went from arbitrary to correct, so version 1 embeddings are not worth keeping.
- *
- * Version 3 pinned the excerpt to an exact range of samples, see `Excerpt`. Before it, the window
- * was centred on a duration the tag reader gives in whole seconds, while the Android app centres it
- * on microseconds, so the same track was embedded from ten seconds that began up to half a second
- * apart — worth a cosine of about 0.95 where 0.9985 is the bar for two embeddings describing the
- * same thing. Version 2 embeddings therefore describe a slightly different ten seconds than
- * version 3 does, and that is also what made them impossible to carry between devices.
- *
- * Smart albums stamp it into their cache signature too: albums built from version 1 embeddings
- * describe a grouping that no longer exists.
- */
-internal const val ANALYSIS_VERSION = 3
+// ANALYSIS_VERSION and EMBEDDING_DIMENSIONS live in db/EmbeddingEntity.kt, where common
+// code — sync among it — can say them too.
 
 class DesktopMusicDao(private val baseDir: File) : MusicDao {
     private val embeddingsFile = File(baseDir, "embeddings.bin")
@@ -98,7 +78,7 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     return
                 }
                 val formatVersion = input.readInt()
-                if (formatVersion != FORMAT_VERSION) {
+                if (formatVersion !in READABLE_FORMATS) {
                     println("DesktopMusicDao: unknown storage format $formatVersion, ignoring it")
                     return
                 }
@@ -114,7 +94,11 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     val dimension = input.readInt()
                     val vector = ArrayList<Float>(dimension)
                     repeat(dimension) { vector.add(input.readFloat()) }
-                    loaded[path] = EmbeddingEntity(path, vector)
+                    // Version 1 had no notion of a vector having been offered to anyone, because
+                    // there was nowhere to offer it to. Zero is therefore the true answer for
+                    // every row in such a file, and the first sync pass walks the library.
+                    val publishedAt = if (formatVersion >= 2) input.readLong() else 0L
+                    loaded[path] = EmbeddingEntity(path, vector, publishedAt)
                 }
                 synchronized(lock) {
                     cache.clear()
@@ -201,6 +185,7 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     out.writeUTF(row.path)
                     out.writeInt(row.vector.size)
                     for (x in row.vector) out.writeFloat(x)
+                    out.writeLong(row.publishedAt)
                 }
             }
             if (!tmp.renameTo(embeddingsFile)) {
@@ -220,6 +205,39 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         synchronized(lock) {
             cache[embedding.path] = embedding
         }
+    }
+
+    override suspend fun insertEmbeddings(embeddings: List<EmbeddingEntity>): Int {
+        if (embeddings.isEmpty()) return 0
+        synchronized(lock) {
+            for (embedding in embeddings) cache[embedding.path] = embedding
+        }
+        // Saved at once, unlike a single insert: the scanner batches its own saves because it is
+        // about to write the next one anyway, while a batch from another device may be the last
+        // thing that happens for hours.
+        forceSave()
+        return embeddings.size
+    }
+
+    override suspend fun vectorsToPublish(limit: Int): List<EmbeddingEntity> =
+        synchronized(lock) {
+            // In the table's own order, which is the order they were analysed in, so a backfill
+            // that keeps being interrupted keeps making progress rather than revisiting a corner.
+            cache.values.asSequence().filter { it.publishedAt == 0L }.take(limit).toList()
+        }
+
+    override suspend fun markVectorsPublished(paths: List<String>, at: Long) {
+        if (paths.isEmpty()) return
+        var changed = false
+        synchronized(lock) {
+            for (path in paths) {
+                val row = cache[path] ?: continue
+                if (row.publishedAt != 0L) continue
+                cache[path] = row.copy(publishedAt = at)
+                changed = true
+            }
+        }
+        if (changed) forceSave()
     }
 
     override suspend fun deleteEmbedding(path: String) {
@@ -476,8 +494,17 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         /** "AIME", so a file that is not this table is recognised rather than misparsed. */
         const val MAGIC = 0x41494D45
 
-        /** How the table is laid out, as opposed to what the vectors in it mean. */
-        const val FORMAT_VERSION = 1
+        /**
+         * How the table is laid out, as opposed to what the vectors in it mean.
+         *
+         * Version 2 added, per row, when the vector was offered to the other devices. A version 1
+         * file is still read — it is nine megabytes of somebody's analysis — and is written back as
+         * version 2 the next time the table is saved.
+         */
+        const val FORMAT_VERSION = 2
+
+        /** Layouts this build can read. Writing is always the current one. */
+        val READABLE_FORMATS = setOf(1, 2)
 
         /** "AIMH", which tells a numbered listening log from the shape that came before it. */
         const val HISTORY_MAGIC = 0x41494D48

@@ -8,6 +8,8 @@ actual class ModelDownloader actual constructor() {
     actual val progress: StateFlow<ModelProgress> get() = repository.progress
 
     actual fun audioModelReady(): Boolean = repository.isAvailable(ModelAsset.AUDIO_MODEL)
+
+    actual fun audioModelSha256(): String = ModelAsset.AUDIO_MODEL.sha256
     actual fun textModelReady(): Boolean = repository.isAvailable(ModelAsset.TEXT_MODEL)
 
     actual fun pendingBytes(): Long = repository.pendingDownloadBytes(ModelAsset.entries.toList())

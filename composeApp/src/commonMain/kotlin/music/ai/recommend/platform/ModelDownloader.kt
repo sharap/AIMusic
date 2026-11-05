@@ -25,6 +25,15 @@ expect class ModelDownloader() {
     val progress: StateFlow<ModelProgress>
 
     fun audioModelReady(): Boolean
+
+    /**
+     * sha256 of the audio model this app analyses with.
+     *
+     * Asked of the platform because only it knows which export it has: two devices may hold
+     * different ones — an int8 and an fp32 of the same network produce different vectors — and this
+     * is the only name a variant has that cannot be got wrong. It travels with every embedding.
+     */
+    fun audioModelSha256(): String
     fun textModelReady(): Boolean
 
     /** Bytes still to fetch for everything the app uses. */

@@ -33,6 +33,7 @@ import music.ai.recommend.ai.SmartAlbum
 import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
+import music.ai.recommend.sync.DaoVectorStore
 import music.ai.recommend.sync.PlayLogStore
 import music.ai.recommend.sync.SyncCoordinator
 import music.ai.recommend.sync.SyncFolder
@@ -216,6 +217,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val deviceId: String = "",
         val sent: Int = 0,
         val takenIn: Int = 0,
+        /** Embeddings offered to the other devices, and taken from them. */
+        val vectorsSent: Int = 0,
+        val vectorsTakenIn: Int = 0,
+        /** True while a library's worth of vectors is still working its way across. */
+        val vectorsWaiting: Boolean = false,
         /** Listens about tracks this library has not got yet; they wait rather than being lost. */
         val waiting: Int = 0,
         val busy: Boolean = false,
@@ -1031,7 +1037,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             store = PlayLogStore(db.musicDao(), { allSongs }, HISTORY_KEEP_DAYS),
             folder = { syncFolder() },
             keepDays = HISTORY_KEEP_DAYS.toInt(),
-            note = { println("Sync: $it") }
+            note = { println("Sync: $it") },
+            vectors = DaoVectorStore(db.musicDao(), { allSongs }, models.audioModelSha256())
         ).also { syncCoordinator = it }
     }
 
@@ -1089,6 +1096,18 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // the next real one wait out the throttle for nothing.
                 runCatching { coordinator.pull(now).also { if (it.read != null) lastPullAt = now } }
                     .getOrElse { println("Sync: could not read the history in: $it"); null }
+
+            // Vectors on the same moments as a full pass, and never on a finished listen: there is
+            // nothing new to publish then, and reading a library's worth of them would be work for
+            // nothing. In the steady state this costs one empty query.
+            val sentVectors = if (pulled == null) null else
+                runCatching { coordinator.pushVectors(now) }
+                    .getOrElse { println("Sync: could not write the vectors out: $it"); null }
+            val tookVectors = if (pulled == null) null else
+                runCatching { coordinator.pullVectors(now) }
+                    .getOrElse { println("Sync: could not read the vectors in: $it"); null }
+            tookVectors?.refused?.takeIf { it.isNotEmpty() }?.let { println("Sync: vectors refused: $it") }
+
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
                     // Totals since this run started, not of the last pass: most passes happen on
@@ -1097,11 +1116,19 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     sent = it.sent + sent,
                     takenIn = it.takenIn + (pulled?.takenIn ?: 0),
                     waiting = pulled?.waiting ?: it.waiting,
+                    vectorsSent = it.vectorsSent + (sentVectors?.written ?: 0),
+                    vectorsTakenIn = it.vectorsTakenIn + (tookVectors?.takenIn ?: 0),
+                    vectorsWaiting = tookVectors?.more ?: it.vectorsWaiting,
                     lastRunAt = now
                 )
             }
             // Listens taken in change what counts as recently played, which the daily mix uses.
             if ((pulled?.takenIn ?: 0) > 0) refreshDailyMix()
+            // Vectors taken in are tracks that have become analysed without being scanned, which
+            // is what the smart albums and the daily mix are built from.
+            if ((tookVectors?.takenIn ?: 0) > 0) {
+                loadScannedIds()
+            }
         }
     }
 

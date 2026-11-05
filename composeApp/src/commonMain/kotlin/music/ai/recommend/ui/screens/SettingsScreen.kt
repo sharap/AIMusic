@@ -410,6 +410,19 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             }
                         }
 
+                        // Vectors get a line of their own, and only once something has moved: for
+                        // most people this is a one-off backfill they should be able to watch
+                        // finish, and after that a line that always reads zero would be noise.
+                        if (syncSummary.vectorsSent > 0 || syncSummary.vectorsTakenIn > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "Vectors: sent ${syncSummary.vectorsSent}, " +
+                                    "taken in ${syncSummary.vectorsTakenIn}" +
+                                    if (syncSummary.vectorsWaiting) " · more to come" else "",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(8.dp))
                         TextButton(onClick = { viewModel.forgetSyncFolder() }) {
                             Text("Forget this folder", color = MaterialTheme.colorScheme.error)

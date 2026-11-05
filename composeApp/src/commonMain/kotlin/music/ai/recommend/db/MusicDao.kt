@@ -10,6 +10,21 @@ interface MusicDao {
     suspend fun clearAllEmbeddings()
 
     /**
+     * Several at once, which is how vectors arrive from another device, and saved before this
+     * returns so that a crash does not lose what was just taken in.
+     *
+     * @return how many were stored. Zero for a failure, so the caller can leave the folder looking
+     *   unread rather than marking a batch taken in that was not.
+     */
+    suspend fun insertEmbeddings(embeddings: List<EmbeddingEntity>): Int
+
+    /** Vectors not yet offered to the other devices; see [EmbeddingEntity.publishedAt]. */
+    suspend fun vectorsToPublish(limit: Int): List<EmbeddingEntity>
+
+    /** Records that these have been dealt with, whether or not they could travel. */
+    suspend fun markVectorsPublished(paths: List<String>, at: Long)
+
+    /**
      * True when embeddings from an older analysis had to be thrown away on startup.
      *
      * The settings screen says so, because otherwise the library would appear to have

@@ -139,7 +139,10 @@ class FileSyncFolderTest {
         assertEquals(2, writer.flush(now, force = true))
 
         val progress = HashMap<String, Int>()
+        // The reader hands back what it consumed instead of recording it — a store that fails has
+        // to leave the folder looking unread — so this does what its caller does.
         val outcome = HistoryReader(second, folder(second), progress).read(emptySet(), now, 30)
+            .also { progress.putAll(it.advanced) }
         assertEquals(2, outcome.merge.accepted.size)
         assertEquals(listOf(first, first), outcome.merge.accepted.map { it.deviceId })
         assertEquals(
@@ -150,6 +153,7 @@ class FileSyncFolderTest {
 
         // And a second pass over the same folder takes nothing twice.
         val again = HistoryReader(second, folder(second), progress).read(emptySet(), now, 30)
+            .also { progress.putAll(it.advanced) }
         assertEquals(0, again.merge.accepted.size)
         assertEquals(1, again.filesSkipped)
     }
