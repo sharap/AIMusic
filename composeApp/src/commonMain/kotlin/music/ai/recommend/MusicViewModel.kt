@@ -1133,7 +1133,19 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             val tookVectors = if (pulled == null) null else
                 runCatching { coordinator.pullVectors(now) }
                     .getOrElse { println("Sync: could not read the vectors in: $it"); null }
-            tookVectors?.refused?.takeIf { it.isNotEmpty() }?.let { println("Sync: vectors refused: $it") }
+            // The whole outcome, not only the refusals: "nothing was refused" says very little on
+            // its own, since a vector for a track already analysed here never gets as far as being
+            // judged. These four numbers are what a pass actually did.
+            tookVectors?.let {
+                val seen = it.takenIn + it.alreadyHeld + it.unmatched + it.refused.values.sum()
+                if (seen > 0) {
+                    println(
+                        "Sync: vectors: $seen seen, ${it.takenIn} taken in, ${it.alreadyHeld} " +
+                            "already held, ${it.unmatched} for tracks we lack, " +
+                            "refused ${it.refused}" + if (it.more) ", more waiting" else ""
+                    )
+                }
+            }
 
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
