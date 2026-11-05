@@ -1038,7 +1038,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             folder = { syncFolder() },
             keepDays = HISTORY_KEEP_DAYS.toInt(),
             note = { println("Sync: $it") },
-            vectors = DaoVectorStore(db.musicDao(), { allSongs }, models.audioModelSha256())
+            vectors = DaoVectorStore(db.musicDao(), { allSongs }, models.audioModelSha256()),
+            // The whole library in one pass. Here a vector costs a map lookup and a line of text,
+            // not a file open and a radio wake-up, so there is nothing to spread out — and a cache
+            // that takes nine sittings to be shared is a cache nobody gets.
+            publishLimit = 20_000
         ).also { syncCoordinator = it }
     }
 
@@ -1057,6 +1061,16 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // The end of a listening session: say what was heard, and take in what the other
                 // device has said since, in time for the next daily mix to count it.
                 if (!playing) syncPass(force = true, takeIn = true, throttled = true)
+            }
+        }
+        viewModelScope.launch {
+            // The analysis finishing is the one moment there is certainly something new to offer,
+            // and the only one that does not depend on somebody touching the app. Without it an
+            // hour of analysis sits unshared until the owner happens to come back to the window.
+            var wasScanning = false
+            isAiScanning.collect { scanning ->
+                if (wasScanning && !scanning) syncPass(force = true, takeIn = true)
+                wasScanning = scanning
             }
         }
         refreshSyncSummary()

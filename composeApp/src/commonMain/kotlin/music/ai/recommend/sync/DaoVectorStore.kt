@@ -48,9 +48,11 @@ class DaoVectorStore(
         if (Mp3Excerpt.handles(track)) Mp3Excerpt.DECODER else PLATFORM
 
     override suspend fun excerptStartMs(track: String): Long? {
-        // The same value `AiScanner` passes to the decoder, which is the library scanner's reading
-        // and not a second opinion: the tag reader gives whole seconds, the excerpt rule truncates
-        // to whole seconds anyway, and that agreement is what makes the two platforms meet.
+        // For a format the shared decoder handles, the decoder's own count of the samples — which
+        // is what it chose the window by. The tag reader's whole seconds are a different number,
+        // and naming the window with them is how a correct vector comes to be refused: measured
+        // against one phone, about a quarter of a library came out one two-second bucket apart.
+        if (Mp3Excerpt.handles(track)) return Mp3Excerpt.startMs(java.io.File(track))
         val duration = durationOf(track) ?: return null
         return Excerpt.startMs(duration)
     }
