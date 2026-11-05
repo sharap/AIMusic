@@ -236,6 +236,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     /** One pass over the folder at a time; see [syncPass]. */
     private val syncGate = Mutex()
 
+    /** When the folder was last read, so passes nobody asked for do not read it over and over. */
+    private var lastPullAt = 0L
+
     init {
         // Initialize EQ bands for Desktop VLC (10 bands)
         val freqs = listOf("60Hz", "170Hz", "310Hz", "600Hz", "1kHz", "3kHz", "6kHz", "12kHz", "14kHz", "16kHz")
@@ -1046,7 +1049,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             isPlaying.collect { playing ->
                 // The end of a listening session: say what was heard, and take in what the other
                 // device has said since, in time for the next daily mix to count it.
-                if (!playing) syncPass(force = true, takeIn = true)
+                if (!playing) syncPass(force = true, takeIn = true, throttled = true)
             }
         }
         refreshSyncSummary()
@@ -1062,8 +1065,15 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
      * @param takeIn false for a pass that only has something to say. A listen finishing is one of
      *   those: it comes every few minutes, and reading the whole folder each time would be work
      *   for nothing.
+     * @param throttled for the passes a person causes without meaning to — pausing, switching back
+     *   to the window — which arrive in flurries. See [PULL_THROTTLE_MS]. A pass the owner asked
+     *   for, and the one after a scan, are never throttled.
      */
-    private suspend fun syncPass(force: Boolean, takeIn: Boolean) = withContext(Dispatchers.Default) {
+    private suspend fun syncPass(
+        force: Boolean,
+        takeIn: Boolean,
+        throttled: Boolean = false
+    ) = withContext(Dispatchers.Default) {
         val coordinator = coordinator() ?: return@withContext
         syncGate.withLock {
             val now = nowMs()
@@ -1072,8 +1082,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             // A pass with nothing to take in happens often — a listen finishing is one — and
             // reading the whole folder each time would be work for nothing. A pass before the
             // library is scanned is turned away by the coordinator itself.
-            val pulled = if (!takeIn) null else
-                runCatching { coordinator.pull(now) }
+            val tooSoon = throttled && now - lastPullAt < PULL_THROTTLE_MS
+            val pulled = if (!takeIn || tooSoon) null else
+                // Marked as read only when the folder really was read: the coordinator turns a
+                // pass away when there is no library yet, and counting that as a read would make
+                // the next real one wait out the throttle for nothing.
+                runCatching { coordinator.pull(now).also { if (it.read != null) lastPullAt = now } }
                     .getOrElse { println("Sync: could not read the history in: $it"); null }
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
@@ -1106,6 +1120,16 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         syncCoordinator = null
         saveSettings()
         refreshSyncSummary()
+    }
+
+    /**
+     * The window came to the front, or was opened. Read the folder, so that what the other device
+     * heard is already counted by the time the owner starts a wave or opens a playlist — which is
+     * the whole of why this moment is worth reacting to. Nothing is forced out: coming back to the
+     * window says nothing new about what was played.
+     */
+    fun syncOnOpen() {
+        viewModelScope.launch { syncPass(force = false, takeIn = true, throttled = true) }
     }
 
     /** A pass the owner asked for, which is the same pass with a spinner on it. */
@@ -1202,6 +1226,17 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
         /** How long listens are kept at all; the taste profile only looks back ninety days. */
         const val HISTORY_KEEP_DAYS = 365L
+
+        /**
+         * How soon after one read the sync folder may be read again by a pass nobody asked for.
+         *
+         * The moments that ask for a read are moments a person creates — a pause, a switch to
+         * another window and back — and they arrive in flurries. Here a read is nearly free, but
+         * the phone on the other end of the same folder pays for every change to it, and the two
+         * apps are better off behaving the same way. Nothing a person is waiting for is behind
+         * this minute: what they will look at is already in the log from the read a moment ago.
+         */
+        const val PULL_THROTTLE_MS = 60_000L
         const val DAY_MS = 24L * 60 * 60 * 1000
     }
 

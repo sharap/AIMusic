@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import music.ai.recommend.ui.theme.AiMusicTheme
 
@@ -67,6 +68,16 @@ fun App(
         onDispose {
             viewModel.release()
         }
+    }
+
+    // The sync folder is read whenever the window comes to the front, so that what the other
+    // device heard is already counted by the time the owner starts a wave or opens a playlist.
+    // Focus rather than a window listener: it covers being restored from the taskbar and being
+    // switched back to, and it is true at the first composition, so opening the app counts. The
+    // pass itself refuses to read the folder more than once a minute.
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    LaunchedEffect(windowFocused) {
+        if (windowFocused) viewModel.syncOnOpen()
     }
 
     val folders by viewModel.folders.collectAsState()
