@@ -177,6 +177,26 @@ class SyncRoundTripTest {
     }
 
     @Test
+    fun aPassWithoutALibraryTakesNothingAndMarksNothingRead() = runBlocking {
+        // The expensive mistake would be the quiet one. With no library nothing can be placed, so
+        // every record would go to the waiting list — which is capped — while the progress map
+        // would say those batches had been read. A folder holding more than the cap would lose its
+        // oldest for good. So the pass does not happen: on the next one, with a library, the same
+        // records are read and placed.
+        heard(songs[0].path, now - 300_000)
+        assertEquals(1, coordinator(first).push(now, force = true).written)
+
+        val nothing = coordinator(second, library = emptyList()).pull(now)
+        assertEquals(0, nothing.takenIn)
+        assertEquals(0, nothing.waiting)
+        assertEquals(null, nothing.read, "папка не должна быть прочитана")
+
+        // Nothing was written down as read, so the same records arrive once the library is there.
+        assertEquals(1, coordinator(second).pull(now).takenIn)
+        assertEquals(1, dao.playEventsFromOtherDevices(0).size)
+    }
+
+    @Test
     fun theOutboxCarriesOnWhereItLeftOff() = runBlocking {
         heard(songs[0].path, now - 300_000)
         coordinator(first).push(now, force = true)

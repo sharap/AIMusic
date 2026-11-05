@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import music.ai.recommend.model.*
 import music.ai.recommend.platform.MusicScanner
 import music.ai.recommend.platform.MusicPlayer
@@ -231,6 +233,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private var syncCoordinator: SyncCoordinator<String>? = null
 
+    /** One pass over the folder at a time; see [syncPass]. */
+    private val syncGate = Mutex()
+
     init {
         // Initialize EQ bands for Desktop VLC (10 bands)
         val freqs = listOf("60Hz", "170Hz", "310Hz", "600Hz", "1kHz", "3kHz", "6kHz", "12kHz", "14kHz", "16kHz")
@@ -426,6 +431,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     _playlists.value = db.musicDao().loadPlaylists(allSongs)
                     println("MusicViewModel: Scan complete. Found ${scannedFolders.size} folders, ${allSongs.size} total songs.")
                 }
+
+                // The earliest moment anything from the other device can be placed: before the
+                // scan there is nothing to match a listen against. A machine coming back after
+                // being away catches up here, without being asked.
+                syncPass(force = true, takeIn = true)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {
                     println("MusicViewModel: Scan cancelled.")
@@ -989,7 +999,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             // Offered to the outbox, which decides whether it is yet worth touching the folder.
             // After the listen is stored, not before: the outbox's watermark is a row number, and
             // a row that is not there yet cannot be described.
-            runCatching { coordinator()?.push(nowMs()) }
+            syncPass(force = false, takeIn = false)
         }
     }
 
@@ -1034,10 +1044,51 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     private fun observeSync() {
         viewModelScope.launch {
             isPlaying.collect { playing ->
-                if (!playing) runCatching { coordinator()?.push(nowMs(), force = true) }
+                // The end of a listening session: say what was heard, and take in what the other
+                // device has said since, in time for the next daily mix to count it.
+                if (!playing) syncPass(force = true, takeIn = true)
             }
         }
         refreshSyncSummary()
+    }
+
+    /**
+     * One pass over the folder: what is waiting goes out, and what has arrived comes in.
+     *
+     * Behind a lock, because the moments that ask for a pass can arrive together — a listen
+     * finishing is also often playback stopping — and two passes at once would read the same files
+     * twice and write the state from under each other.
+     *
+     * @param takeIn false for a pass that only has something to say. A listen finishing is one of
+     *   those: it comes every few minutes, and reading the whole folder each time would be work
+     *   for nothing.
+     */
+    private suspend fun syncPass(force: Boolean, takeIn: Boolean) = withContext(Dispatchers.Default) {
+        val coordinator = coordinator() ?: return@withContext
+        syncGate.withLock {
+            val now = nowMs()
+            val sent = runCatching { coordinator.push(now, force).written }
+                .getOrElse { println("Sync: could not write the history out: $it"); 0 }
+            // A pass with nothing to take in happens often — a listen finishing is one — and
+            // reading the whole folder each time would be work for nothing. A pass before the
+            // library is scanned is turned away by the coordinator itself.
+            val pulled = if (!takeIn) null else
+                runCatching { coordinator.pull(now) }
+                    .getOrElse { println("Sync: could not read the history in: $it"); null }
+            _syncSummary.value = _syncSummary.value.let {
+                it.copy(
+                    // Totals since this run started, not of the last pass: most passes happen on
+                    // their own now, and a card that read "sent 0" after each of them would say
+                    // nothing was working.
+                    sent = it.sent + sent,
+                    takenIn = it.takenIn + (pulled?.takenIn ?: 0),
+                    waiting = pulled?.waiting ?: it.waiting,
+                    lastRunAt = now
+                )
+            }
+            // Listens taken in change what counts as recently played, which the daily mix uses.
+            if ((pulled?.takenIn ?: 0) > 0) refreshDailyMix()
+        }
     }
 
     /** Takes the folder the owner picked. */
@@ -1057,25 +1108,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         refreshSyncSummary()
     }
 
-    /** Sends what is waiting and reads what has arrived. Also what the settings screen asks for. */
+    /** A pass the owner asked for, which is the same pass with a spinner on it. */
     fun syncNow() {
         if (_syncSummary.value.busy) return
         _syncSummary.value = _syncSummary.value.copy(busy = true)
-        viewModelScope.launch(Dispatchers.Default) {
-            val now = nowMs()
-            val sent = runCatching { coordinator()?.push(now, force = true)?.written ?: 0 }
-                .getOrElse { println("Sync: could not write the history out: $it"); 0 }
-            val pulled = runCatching { coordinator()?.pull(now) }
-                .getOrElse { println("Sync: could not read the history in: $it"); null }
-            _syncSummary.value = _syncSummary.value.copy(
-                sent = sent,
-                takenIn = pulled?.takenIn ?: 0,
-                waiting = pulled?.waiting ?: 0,
-                busy = false,
-                lastRunAt = now
-            )
-            // Listens taken in change what counts as recently played, which the daily mix uses.
-            if ((pulled?.takenIn ?: 0) > 0) refreshDailyMix()
+        viewModelScope.launch {
+            syncPass(force = true, takeIn = true)
+            _syncSummary.value = _syncSummary.value.copy(busy = false)
         }
     }
 
