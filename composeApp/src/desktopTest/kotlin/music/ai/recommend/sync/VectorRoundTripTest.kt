@@ -65,13 +65,19 @@ class VectorRoundTripTest {
 
     private fun vector(seed: Int) = FloatArray(EMBEDDING_DIMENSIONS) { ((it + seed) % 17) * 0.05f + 0.013f }
 
-    private fun coordinator(deviceId: String, library: List<Song> = tracks): SyncCoordinator<String> =
+    private fun coordinator(
+        deviceId: String,
+        library: List<Song> = tracks,
+        analysingWith: String = model
+    ): SyncCoordinator<String> =
         SyncCoordinator(
             deviceId = deviceId,
+            // The same file for every coordinator of a device, as a restart would find it: a test
+            // about what a device remembers is meaningless with a fresh state each time.
             state = SyncState.load(File(baseDir, "state-$deviceId.json")),
             store = PlayLogStore(dao, { library }),
             folder = { FileSyncFolder(folder, deviceId) },
-            vectors = DaoVectorStore(dao, { library }, model)
+            vectors = DaoVectorStore(dao, { library }, analysingWith)
         )
 
     private suspend fun analysed(vararg indices: Int) {
@@ -157,6 +163,33 @@ class VectorRoundTripTest {
 
         val pulled = coordinator(second).pullVectors(now)
         assertEquals(mapOf(VectorVerdict.OtherVersion to 1), pulled.refused)
+    }
+
+    @Test
+    fun aRefusalOnOtherTermsIsReconsideredWhenTheTermsChange() {
+        // The expensive case, and the one most likely to actually happen: this machine analyses
+        // with the full export of the model and a phone defaults to the quantised one, so every
+        // vector is refused. A refusal marks the batch read, so without this the day the owner
+        // switches the phone over, a library's worth of work sitting right there would stay
+        // unclaimed for good.
+        runBlocking {
+            analysed(0)
+            coordinator(first).pushVectors(now)
+            dao.clearAllEmbeddings()
+
+            val otherModel = "ff".repeat(32)
+            val refused = coordinator(second, analysingWith = otherModel).pullVectors(now)
+            assertEquals(0, refused.takenIn)
+            assertEquals(mapOf(VectorVerdict.OtherModel to 1), refused.refused)
+
+            // The owner switches. Same device, same state file, terms that now agree.
+            val taken = coordinator(second).pullVectors(now)
+            assertEquals(1, taken.takenIn, "принято: $taken")
+            assertEquals(1, dao.getAllEmbeddings().size)
+
+            // And it is not read a third time now that the terms have settled.
+            assertEquals(0, coordinator(second).pullVectors(now).takenIn)
+        }
     }
 
     @Test
