@@ -127,8 +127,9 @@ class VectorRoundTripTest {
                 "вектор ${tracks[index].path}"
             )
         }
-        // And taken in means dealt with: nobody to relay to, and the folder would carry each twice.
-        assertEquals(0, coordinator(second).pushVectors(now).written)
+        // And what came in goes out again from here, which is what makes the folder restorable;
+        // `aVectorTakenInIsOfferedOnwards` is about that on its own.
+        assertEquals(2, coordinator(second).pushVectors(now).written)
     }
 
     @Test
@@ -217,6 +218,43 @@ class VectorRoundTripTest {
     }
 
     @Test
+    fun aVectorTakenInIsOfferedOnwards() = runBlocking {
+        // What makes the folder a cache a device can be restored from rather than one it can only
+        // contribute to. Each device offers what it holds, so a vector ends up in the folder once
+        // per device that has it — and the device that analysed it can lose it and get it back.
+        analysed(0)
+        assertEquals(1, coordinator(first).pushVectors(now).written)
+        dao.clearAllEmbeddings()
+        assertEquals(1, coordinator(second).pullVectors(now).takenIn)
+
+        // The second device now has it and puts it in its own directory too.
+        assertEquals(1, coordinator(second).pushVectors(now).written)
+        val folder = FileSyncFolder(this@VectorRoundTripTest.folder, second)
+        assertEquals(1, folder.files(second, VectorWriter.DIRECTORY).size)
+        // And only once: offering it again every pass would have the folder grow without end.
+        assertEquals(0, coordinator(second).pushVectors(now).written)
+    }
+
+    @Test
+    fun aDeviceThatHasLostItsVectorsReadsTheFolderAgain() = runBlocking {
+        analysed(0, 1)
+        coordinator(first).pushVectors(now)
+        dao.clearAllEmbeddings()
+        assertEquals(2, coordinator(second).pullVectors(now).takenIn)
+
+        // Everything gone but the state file, which says the folder has been read to the end. That
+        // is the case the backup is for: a store wiped or a file that would not read, with the
+        // vectors sitting right there in the folder.
+        dao.clearAllEmbeddings()
+        val back = coordinator(second).pullVectors(now)
+        assertEquals(2, back.takenIn, "принято обратно: $back")
+        assertEquals(2, dao.getAllEmbeddings().size)
+
+        // And once they are back, the folder is not read again on every pass.
+        assertEquals(0, coordinator(second).pullVectors(now).takenIn)
+    }
+
+    @Test
     fun aVectorAlreadyHeldIsNotTakenTwice() = runBlocking {
         analysed(0)
         coordinator(first).pushVectors(now)
@@ -225,6 +263,21 @@ class VectorRoundTripTest {
         assertEquals(0, pulled.takenIn)
         assertEquals(1, pulled.alreadyHeld)
         assertTrue(pulled.refused.isEmpty())
+    }
+
+    @Test
+    fun aPassWithAnIncompleteLibraryRetiresNothingElse() = runBlocking {
+        // The bug this is here for cost four thousand vectors on a phone. A pass whose library
+        // lists only some of the tracks used to mark every other vector as dealt with — "nothing
+        // to name it by" — and a vector marked once is never offered again. A library can be short
+        // for ordinary reasons: not read yet, mid-rescan, a scanner catching up.
+        analysed(0, 1)
+        val partial = coordinator(first, library = tracks.take(1))
+        assertEquals(1, partial.pushVectors(now, SyncCoordinator.PUBLISH_EVERYTHING).written)
+
+        // The one it could not describe was left alone, so it goes out once the library is whole.
+        assertEquals(1, coordinator(first).pushVectors(now).written)
+        assertEquals(0, coordinator(first).pushVectors(now).written)
     }
 
     @Test

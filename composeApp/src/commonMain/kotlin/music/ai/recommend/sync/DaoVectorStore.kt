@@ -69,19 +69,19 @@ class DaoVectorStore(
     override suspend fun analysed(): Set<String> =
         dao.getAllEmbeddings().mapTo(HashSet()) { it.path }
 
-    override suspend fun takeIn(vectors: List<VectorStore.Held<String>>): Int {
-        val now = System.currentTimeMillis()
-        val stored = dao.insertEmbeddings(vectors.map { held ->
+    override suspend fun takeIn(vectors: List<VectorStore.Held<String>>): Int =
+        dao.insertEmbeddings(vectors.map { held ->
             EmbeddingEntity(
                 path = held.track,
                 vector = held.vector.toList(),
-                // Marked as dealt with as they are stored: with two devices there is nobody to
-                // relay to, and offering them back out would have the folder carry each twice.
-                publishedAt = now
+                // Left unoffered on purpose, so that this machine will put them in the folder too.
+                // The folder then holds every vector once per device that has it, which is what
+                // makes it a cache anything can be restored from: a device that loses its own gets
+                // them back from whoever else was handed them, instead of analysing a library
+                // again. The price is each vector being carried twice with two devices.
+                publishedAt = 0L
             )
         })
-        return stored
-    }
 
     private companion object {
         /** What this platform decodes everything but mp3 with. Never allowed to travel. */
