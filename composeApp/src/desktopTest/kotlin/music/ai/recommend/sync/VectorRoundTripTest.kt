@@ -32,11 +32,17 @@ class VectorRoundTripTest {
     private lateinit var baseDir: File
     private lateinit var folder: File
 
-    private val tracks = listOf(
-        song("/music/Imagine Dragons - Believer.mp3", "Imagine Dragons", "Believer", 207_000),
-        song("/music/Мельница - Ночная кобыла.mp3", "", "", 210_000),
-        song("/music/01 - Atlantia.m4a", "Secret Garden", "Atlantia", 179_000)
-    )
+    /**
+     * Two real mp3s and one name.
+     *
+     * Real files because the excerpt is named by walking the file's frames, which is the whole
+     * point of this feature working at all — and because the durations below are deliberately not
+     * the files' own: the fixture is 25 seconds, and the test insists the window comes from the
+     * frames and not from what the tag reader claims.
+     */
+    private lateinit var tracks: List<Song>
+
+    private val fixture = File("src/desktopTest/resources/mp3_excerpt_fixture.mp3")
 
     private fun song(path: String, artist: String, title: String, duration: Long) = Song(
         id = 0,
@@ -54,6 +60,18 @@ class VectorRoundTripTest {
     fun emptyEverything() {
         baseDir = File(System.getProperty("java.io.tmpdir"), "aimusic-vectors-${System.nanoTime()}")
         folder = File(baseDir, "shared").apply { mkdirs() }
+        val music = File(baseDir, "music").apply { mkdirs() }
+        val believer = File(music, "Imagine Dragons - Believer.mp3")
+        val mare = File(music, "Мельница - Ночная кобыла.mp3")
+        fixture.copyTo(believer)
+        fixture.copyTo(mare)
+        tracks = listOf(
+            // The durations are the tag reader's story and the files are 25 s of frames; the gap
+            // is on purpose.
+            song(believer.path, "Imagine Dragons", "Believer", 207_000),
+            song(mare.path, "", "", 210_000),
+            song(File(music, "01 - Atlantia.m4a").path, "Secret Garden", "Atlantia", 179_000)
+        )
     }
 
     @AfterTest
@@ -127,14 +145,20 @@ class VectorRoundTripTest {
     }
 
     @Test
-    fun theExcerptIsNamedFromTheDurationTheAnalysisUses() = runBlocking {
+    fun theExcerptIsNamedByTheDecoderAndNotByWhatTheTagsClaim() = runBlocking {
         val store = DaoVectorStore(dao, { tracks }, model)
-        // The tag reader gives whole seconds and `Excerpt.startMs` truncates to whole seconds
-        // anyway, which is the agreement that lets the two platforms meet at all.
-        assertEquals(Excerpt.startMs(207_000), store.excerptStartMs(tracks[0].path))
-        assertEquals(0L, store.excerptStartMs(tracks[0].path)!! % 1000)
-        // A track this library does not hold has no excerpt and therefore nothing to say.
-        assertEquals(null, store.excerptStartMs("/music/нет такого.mp3"))
+        // The file is 25 s of frames, so the middle ten begin at 7 s — whatever the tag reader
+        // says. Naming it from the duration instead is how a correct vector comes to be refused:
+        // against one phone that disagreed for two tracks in three.
+        assertEquals(7_000L, store.excerptStartMs(tracks[0].path))
+        assertEquals(98_000L, Excerpt.startMs(207_000))
+
+        // A file that is not there has no window, and therefore nothing to say about it.
+        assertEquals(null, store.excerptStartMs(File(baseDir, "music/нет такого.mp3").path))
+
+        // For a format with no shared decoder the platform's duration is all there is — and those
+        // vectors do not travel, so nothing rests on it.
+        assertEquals(Excerpt.startMs(179_000), store.excerptStartMs(tracks[2].path))
     }
 
     @Test
