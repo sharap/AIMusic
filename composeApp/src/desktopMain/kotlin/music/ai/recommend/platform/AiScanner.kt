@@ -14,6 +14,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
 import music.ai.recommend.ai.Excerpt
+import music.ai.recommend.ai.Mp3Excerpt
 import music.ai.recommend.db.AppDatabase
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.getAppDatabase
@@ -149,7 +150,7 @@ actual class AiScanner actual constructor() {
 
                                 if (!File(song.path).exists()) return@withTimeoutOrNull
 
-                                val audioData = audioDecoder.decodeChunk(song.path, CHUNK_MS, song.duration)
+                                val audioData = decodeExcerpt(song.path, song.duration)
 
                                 // A track that would not decode is still stored, as a zero vector,
                                 // so the next scan does not keep retrying it. Cosine similarity
@@ -231,6 +232,25 @@ actual class AiScanner actual constructor() {
             for (i in v.indices) v[i] /= norm
         }
         return v
+    }
+
+    /**
+     * The excerpt, from whichever decoder is right for the file.
+     *
+     * mp3 goes to [Mp3Excerpt], which is the same code the Android app runs, because the platform
+     * decoders do not agree on where an mp3 frame sits: measured against ffmpeg, Android's begins
+     * its output 576 samples later and its seek over a variable bitrate lands hundreds of samples
+     * further off again, which is enough to make an embedding from one device useless on the
+     * other. Everything else still goes through ffmpeg, and its embeddings stay on this machine
+     * until there is a shared decoder for those formats too.
+     */
+    private fun decodeExcerpt(path: String, durationMs: Long): FloatArray {
+        if (Mp3Excerpt.handles(path)) {
+            val samples = runCatching { Mp3Excerpt.decode(File(path)) }.getOrElse { FloatArray(0) }
+            if (samples.isNotEmpty()) return samples
+            println("AiScanner: shared mp3 decoder gave nothing for $path, using ffmpeg")
+        }
+        return audioDecoder.decodeChunk(path, CHUNK_MS, durationMs)
     }
 
     private companion object {

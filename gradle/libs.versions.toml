@@ -24,6 +24,7 @@ dbusJava = "5.1.1"
 jaudiotagger = "3.0.1"
 
 [libraries]
+jlayer = { group = "javazoom", name = "jlayer", version = "1.0.1" }
 jaudiotagger = { group = "net.jthink", name = "jaudiotagger", version = "3.0.1" }
 vlcj = { group = "uk.co.caprica", name = "vlcj", version.ref = "vlcj" }
 dbus-java-core = { group = "com.github.hypfvieh", name = "dbus-java-core", version.ref = "dbusJava" }
