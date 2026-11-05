@@ -19,10 +19,17 @@ import java.io.FileOutputStream
  * 40-track library, the peak similarity of a matching description roughly doubled and genre
  * matches went from arbitrary to correct, so version 1 embeddings are not worth keeping.
  *
+ * Version 3 pinned the excerpt to an exact range of samples, see `Excerpt`. Before it, the window
+ * was centred on a duration the tag reader gives in whole seconds, while the Android app centres it
+ * on microseconds, so the same track was embedded from ten seconds that began up to half a second
+ * apart — worth a cosine of about 0.95 where 0.9985 is the bar for two embeddings describing the
+ * same thing. Version 2 embeddings therefore describe a slightly different ten seconds than
+ * version 3 does, and that is also what made them impossible to carry between devices.
+ *
  * Smart albums stamp it into their cache signature too: albums built from version 1 embeddings
  * describe a grouping that no longer exists.
  */
-internal const val ANALYSIS_VERSION = 2
+internal const val ANALYSIS_VERSION = 3
 
 class DesktopMusicDao(private val baseDir: File) : MusicDao {
     private val embeddingsFile = File(baseDir, "embeddings.bin")

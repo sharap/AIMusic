@@ -2,7 +2,6 @@ package music.ai.recommend.ai
 
 import java.io.BufferedInputStream
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
 
 /**
  * Decodes an excerpt of a track to mono 48 kHz float PCM by piping it through ffmpeg.
@@ -40,7 +39,16 @@ class DesktopAudioDecoder {
     }
 
     /**
-     * @param durationMs how much audio to return.
+     * Decodes the excerpt [Excerpt] picks, as exactly [Excerpt.SAMPLES] samples.
+     *
+     * The exact count matters more than it looks. One sample short of ten seconds and the feature
+     * extractor takes its repeat-and-pad branch — the one meant for tracks shorter than the
+     * excerpt — and finishes the excerpt with silence; measured on one mp3 that moved the
+     * embedding by a cosine of 0.10, against the 0.9985 at which two embeddings count as the same.
+     * So ffmpeg is asked for a little more than ten seconds and exactly ten are read back, which
+     * leaves a shortfall meaning what it should: the track really is that short.
+     *
+     * @param durationMs how much audio to return, normally [Excerpt.LENGTH_MS].
      * @param trackDurationMs the track's full length, so the excerpt can be taken from the middle;
      *   0 when the scanner could not read it, in which case ffprobe is asked.
      * @return mono 48 kHz samples, or an empty array if the track could not be decoded.
@@ -56,13 +64,17 @@ class DesktopAudioDecoder {
             // The middle of the track, the way the reference scanner picks it. Seeking to a fixed
             // 20 s instead meant every embedding described whatever happened to be playing there —
             // usually still the intro — and anything shorter than 20 s decoded to nothing at all.
-            val startSeconds = startOffsetSeconds(path, durationMs, trackDurationMs)
+            val startSeconds = startOffsetSeconds(path, trackDurationMs)
 
+            // Asked for longer than wanted, because exactly how many samples ffmpeg hands over for
+            // a request of exactly ten seconds depends on how it rounds the end of the span. The
+            // read below stops at the sample that is wanted, so the surplus costs a fraction of a
+            // second of decoding and buys an excerpt that is never a sample short.
             val builder = ProcessBuilder(
                 "ffmpeg",
                 "-ss", formatSeconds(startSeconds),
                 "-i", path,
-                "-t", formatSeconds(durationMs / 1000.0),
+                "-t", formatSeconds(durationMs / 1000.0 + SPAN_SLACK_SECONDS),
                 "-f", "s16le",
                 "-ac", "1",
                 "-ar", SAMPLE_RATE.toString(),
@@ -133,11 +145,16 @@ class DesktopAudioDecoder {
         }
     }
 
-    /** Centres a [durationMs] excerpt in the track, clamped to zero for tracks shorter than that. */
-    private fun startOffsetSeconds(path: String, durationMs: Long, trackDurationMs: Long): Double {
+    /**
+     * Where the excerpt starts, by the rule both platforms follow: see [Excerpt.startMs].
+     *
+     * The length comes from the tag reader when it could read one, and that is in whole seconds,
+     * which is half the reason the rule rounds the way it does — Android has the duration to the
+     * microsecond and would otherwise centre the window somewhere else entirely.
+     */
+    private fun startOffsetSeconds(path: String, trackDurationMs: Long): Double {
         val lengthMs = if (trackDurationMs > 0) trackDurationMs else probeDurationMs(path)
-        if (lengthMs <= 0) return 0.0
-        return max(0L, lengthMs / 2 - durationMs / 2) / 1000.0
+        return Excerpt.startMs(lengthMs) / 1000.0
     }
 
     /** Track length from ffprobe, for the files the library scanner could not read a header from. */
@@ -162,7 +179,10 @@ class DesktopAudioDecoder {
         String.format(java.util.Locale.ROOT, "%.3f", seconds)
 
     private companion object {
-        const val SAMPLE_RATE = 48000
+        const val SAMPLE_RATE = Excerpt.SAMPLE_RATE
+
+        /** How much longer than the excerpt ffmpeg is asked for, so the last sample is never cut. */
+        const val SPAN_SLACK_SECONDS = 0.1
         const val READ_BUFFER_BYTES = 1 shl 16
         const val MAX_ERROR_CHARS = 2000
         const val PROBE_TIMEOUT_SECONDS = 10L

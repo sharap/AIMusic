@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
+import music.ai.recommend.ai.Excerpt
 import music.ai.recommend.db.AppDatabase
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.getAppDatabase
@@ -234,7 +235,7 @@ actual class AiScanner actual constructor() {
 
     private companion object {
         const val EMBEDDING_SIZE = 512
-        const val CHUNK_MS = 10_000L
+        const val CHUNK_MS = Excerpt.LENGTH_MS
         const val FRAMES = 1001L
         const val MELS = 64L
     }
