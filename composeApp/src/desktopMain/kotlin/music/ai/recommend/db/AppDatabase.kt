@@ -53,6 +53,18 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     private val lock = Any()
     private val historyLock = Any()
     private var countOnDisk = -1
+
+    /** The next record number to hand out; zero until the log has been read once. */
+    private var nextId = 0L
+
+    /** Whether the log on disk is still in the shape that had neither numbers nor devices. */
+    private var historyIsLegacy = false
+
+    /**
+     * Set when the log is in a format this build does not know, which makes it read-only: a newer
+     * AiMusic wrote it, and anything written over it would be somebody's listening thrown away.
+     */
+    private var historyIsForeign = false
     private val cache = LinkedHashMap<String, EmbeddingEntity>()
 
     /** The envelope the pre-binary format stored embeddings in. */
@@ -237,69 +249,209 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
      * Rewriting a whole table for every track played would be wasteful, and a crash mid-write
      * would take the history with it. A truncated tail from an interrupted append costs at most
      * the last listen, because the reader stops at the first short record.
+     *
+     * Each record carries the device that heard it and a number of its own. The device is what
+     * keeps a listen taken in from the phone from being sent straight back out as this machine's,
+     * and the number is what lets the outbox remember where it got to with one value. Both arrived
+     * with sync, so a log written before it is in the older shape and is converted once — see
+     * [readPlayEvents].
      */
-    override suspend fun appendPlayEvent(event: PlayEventEntity) {
+    override suspend fun appendPlayEvent(event: PlayEventEntity) = appendPlayEvents(listOf(event))
+
+    override suspend fun appendPlayEvents(events: List<PlayEventEntity>) {
+        if (events.isEmpty()) return
         synchronized(historyLock) {
+            if (nextId <= 0) historyNow()
+            // A log this build must not write to: either a newer version wrote it, or it is still
+            // in the older shape because converting it failed. Appending a numbered record to an
+            // unnumbered file would leave a log that neither shape can read.
+            if (historyIsForeign || historyIsLegacy) return
             try {
                 if (!baseDir.exists()) baseDir.mkdirs()
+                val fresh = !historyFile.exists() || historyFile.length() == 0L
                 DataOutputStream(FileOutputStream(historyFile, true).buffered()).use { out ->
-                    out.writeUTF(event.path)
-                    out.writeLong(event.playedAt)
-                    out.writeLong(event.playedMs)
-                    out.writeLong(event.durationMs)
+                    if (fresh) writeHistoryHeader(out)
+                    for (event in events) writeRecord(out, event.copy(id = nextId++))
                 }
+                if (countOnDisk >= 0) countOnDisk += events.size
             } catch (e: Exception) {
-                println("DesktopMusicDao: could not record a listen: ${e.message}")
+                println("DesktopMusicDao: could not record ${events.size} listens: ${e.message}")
             }
         }
     }
 
-    override suspend fun playEvents(): List<PlayEventEntity> = synchronized(historyLock) { readPlayEvents() }
+    override suspend fun playEvents(): List<PlayEventEntity> = synchronized(historyLock) { historyNow() }
+
+    override suspend fun playEventsToExport(afterId: Long, limit: Int): List<PlayEventEntity> =
+        synchronized(historyLock) {
+            // In the file's own order, which is the order they were appended in, so the outbox
+            // describes listens oldest first and its watermark only ever moves forward.
+            historyNow().asSequence()
+                .filter { it.deviceId.isEmpty() && it.id > afterId }
+                .take(limit)
+                .toList()
+        }
+
+    override suspend fun newestPlayEventId(): Long =
+        synchronized(historyLock) { historyNow().maxOfOrNull { it.id } ?: 0L }
+
+    override suspend fun playEventsFromOtherDevices(since: Long): List<PlayEventEntity> =
+        synchronized(historyLock) {
+            historyNow().filter { it.deviceId.isNotEmpty() && it.playedAt >= since }
+        }
 
     override suspend fun prunePlayEvents(cutoff: Long) {
         synchronized(historyLock) {
-            val kept = readPlayEvents().filter { it.playedAt >= cutoff }
-            if (kept.size == countOnDisk) return
-            try {
-                val tmp = File(historyFile.path + ".tmp")
-                DataOutputStream(tmp.outputStream().buffered()).use { out ->
-                    for (event in kept) {
-                        out.writeUTF(event.path)
-                        out.writeLong(event.playedAt)
-                        out.writeLong(event.playedMs)
-                        out.writeLong(event.durationMs)
-                    }
-                }
-                if (!tmp.renameTo(historyFile)) {
-                    historyFile.delete()
-                    tmp.renameTo(historyFile)
-                }
-                countOnDisk = kept.size
-            } catch (e: Exception) {
-                println("DesktopMusicDao: could not prune the history: ${e.message}")
-            }
+            val kept = historyNow().filter { it.playedAt >= cutoff }
+            if (historyIsForeign || kept.size == countOnDisk) return
+            writeWholeHistory(kept)
         }
     }
 
-    /** Must be called with [historyLock] held. */
+    /**
+     * The log, and the one-time work that reading it may turn out to need.
+     *
+     * Must be called with [historyLock] held. Whichever history call comes first pays for the
+     * conversion of an older file and for finding the next number to hand out; after that this is
+     * just a read.
+     *
+     * It is a read of the whole file each time, where the phone asks its database for the few rows
+     * it wants. A year of listening is a megabyte, a sync pass reads it a handful of times, and the
+     * alternative is a second copy of the log in memory that has to be kept true — which is how a
+     * log and its index come to disagree.
+     */
+    private fun historyNow(): List<PlayEventEntity> {
+        val events = readPlayEvents()
+        if (nextId <= 0) nextId = (events.maxOfOrNull { it.id } ?: 0L) + 1
+        if (historyIsLegacy) {
+            // Written once, so that the numbers stop depending on a record's position in the file:
+            // pruning drops records from the middle, and positions would then shift under the
+            // outbox's watermark and send listens a second time.
+            println("DesktopMusicDao: converting ${events.size} listens to the numbered log")
+            if (writeWholeHistory(events)) historyIsLegacy = false
+        }
+        return events
+    }
+
+    /** Must be called with [historyLock] held. Replaces the file through a temporary and a rename. */
+    private fun writeWholeHistory(events: List<PlayEventEntity>): Boolean {
+        if (historyIsForeign) return false
+        try {
+            if (!baseDir.exists()) baseDir.mkdirs()
+            val tmp = File(historyFile.path + ".tmp")
+            DataOutputStream(tmp.outputStream().buffered()).use { out ->
+                writeHistoryHeader(out)
+                for (event in events) writeRecord(out, event)
+            }
+            if (!tmp.renameTo(historyFile)) {
+                historyFile.delete()
+                if (!tmp.renameTo(historyFile)) return false
+            }
+            countOnDisk = events.size
+            return true
+        } catch (e: Exception) {
+            println("DesktopMusicDao: could not rewrite the history: ${e.message}")
+            return false
+        }
+    }
+
+    private fun writeHistoryHeader(out: DataOutputStream) {
+        out.writeInt(HISTORY_MAGIC)
+        out.writeInt(HISTORY_FORMAT_VERSION)
+    }
+
+    private fun writeRecord(out: DataOutputStream, event: PlayEventEntity) {
+        out.writeLong(event.id)
+        out.writeUTF(event.deviceId)
+        out.writeUTF(event.path)
+        out.writeLong(event.playedAt)
+        out.writeLong(event.playedMs)
+        out.writeLong(event.durationMs)
+    }
+
+    /** Which shape the log on disk is in, which decides how a record is read. */
+    private enum class HistoryShape { NUMBERED, LEGACY, UNKNOWN }
+
+    /**
+     * Must be called with [historyLock] held.
+     *
+     * A file written before sync has no header and begins with the length of the first path, which
+     * cannot be mistaken for the magic: that would be a path of some sixteen thousand bytes. A file
+     * whose header says a version this build does not know is left alone entirely — a newer AiMusic
+     * wrote it, and guessing at it would throw away someone's listening.
+     */
+    private fun historyShape(): HistoryShape = try {
+        DataInputStream(historyFile.inputStream().buffered()).use { input ->
+            when {
+                input.readInt() != HISTORY_MAGIC -> HistoryShape.LEGACY
+                input.readInt() == HISTORY_FORMAT_VERSION -> HistoryShape.NUMBERED
+                else -> HistoryShape.UNKNOWN
+            }
+        }
+    } catch (e: Exception) {
+        // Too short to hold a header at all, which a file of one legacy record can be.
+        HistoryShape.LEGACY
+    }
+
+    /** Must be called with [historyLock] held. Reads the log in whichever shape it is in. */
     private fun readPlayEvents(): List<PlayEventEntity> {
-        if (!historyFile.exists()) return emptyList()
+        historyIsLegacy = false
+        if (!historyFile.exists()) {
+            historyIsForeign = false
+            return emptyList()
+        }
+        val shape = historyShape()
+        historyIsForeign = shape == HistoryShape.UNKNOWN
+        if (historyIsForeign) {
+            println("DesktopMusicDao: play_history.bin is in a newer format, leaving it untouched")
+            return emptyList()
+        }
+        val numbered = shape == HistoryShape.NUMBERED
         val events = ArrayList<PlayEventEntity>()
         try {
             DataInputStream(historyFile.inputStream().buffered()).use { input ->
+                if (numbered) {
+                    input.readInt()
+                    input.readInt()
+                }
                 while (true) {
-                    val path = try {
-                        input.readUTF()
-                    } catch (e: java.io.EOFException) {
-                        break
+                    // The first field of a record is the one place the file may simply end.
+                    // Anything short after it is an interrupted append, and the outer catch keeps
+                    // every whole record before it.
+                    val id: Long
+                    val deviceId: String
+                    val path: String
+                    if (numbered) {
+                        id = try {
+                            input.readLong()
+                        } catch (e: java.io.EOFException) {
+                            break
+                        }
+                        deviceId = input.readUTF()
+                        path = input.readUTF()
+                    } else {
+                        id = (events.size + 1).toLong()
+                        deviceId = ""
+                        path = try {
+                            input.readUTF()
+                        } catch (e: java.io.EOFException) {
+                            break
+                        }
                     }
-                    events += PlayEventEntity(path, input.readLong(), input.readLong(), input.readLong())
+                    events += PlayEventEntity(
+                        path = path,
+                        playedAt = input.readLong(),
+                        playedMs = input.readLong(),
+                        durationMs = input.readLong(),
+                        deviceId = deviceId,
+                        id = id
+                    )
                 }
             }
         } catch (e: Exception) {
-            // A short record at the tail is an interrupted append; everything before it is good.
             println("DesktopMusicDao: history ends in a partial record, keeping ${events.size} listens")
         }
+        historyIsLegacy = !numbered && events.isNotEmpty()
         countOnDisk = events.size
         return events
     }
@@ -319,6 +471,12 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
 
         /** How the table is laid out, as opposed to what the vectors in it mean. */
         const val FORMAT_VERSION = 1
+
+        /** "AIMH", which tells a numbered listening log from the shape that came before it. */
+        const val HISTORY_MAGIC = 0x41494D48
+
+        /** Version 1 of the numbered log: id, device, path, when, how far, how long. */
+        const val HISTORY_FORMAT_VERSION = 1
     }
 
     override suspend fun saveSettings(settings: AppSettings) {
