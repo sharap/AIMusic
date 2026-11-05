@@ -62,12 +62,12 @@ class FileSyncFolder(
             ?.map { it.name }
             .orEmpty()
 
-    override fun files(deviceId: String): List<String> {
-        val history = directory("$VERSION_PREFIX$deviceId/$HISTORY") ?: return emptyList()
-        return history.listFiles().orEmpty().flatMap { child ->
+    override fun files(deviceId: String, inside: String): List<String> {
+        val root = directory("$VERSION_PREFIX$deviceId/$inside") ?: return emptyList()
+        return root.listFiles().orEmpty().flatMap { child ->
             when {
-                child.isDirectory -> child.listFiles().orEmpty().map { "$HISTORY/${child.name}/${it.name}" }
-                else -> listOf("$HISTORY/${child.name}")
+                child.isDirectory -> child.listFiles().orEmpty().map { "$inside/${child.name}/${it.name}" }
+                else -> listOf("$inside/${child.name}")
             }
         }
     }
@@ -114,6 +114,5 @@ class FileSyncFolder(
 
     private companion object {
         const val VERSION_PREFIX = "aura/v1/"
-        const val HISTORY = "history"
     }
 }

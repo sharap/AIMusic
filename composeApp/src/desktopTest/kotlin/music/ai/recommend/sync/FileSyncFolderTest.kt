@@ -95,7 +95,7 @@ class FileSyncFolderTest {
                 "history/2026-11-05/0001.jsonl",
                 "history/2026-11-05/0002.jsonl"
             ),
-            folder().files(second).sorted()
+            folder().files(second, "history").sorted()
         )
         assertEquals(listOf("вторая"), folder().lines(second, "history/2026-11-05/0002.jsonl"))
     }
@@ -105,7 +105,7 @@ class FileSyncFolderTest {
         // The difference matters to the reader: an empty list would mark the file as read.
         assertNull(folder().lines(second, "history/2026-11-05.jsonl"))
         assertEquals(emptyList(), folder().devices())
-        assertEquals(emptyList(), folder().files(second))
+        assertEquals(emptyList(), folder().files(second, "history"))
     }
 
     @Test
