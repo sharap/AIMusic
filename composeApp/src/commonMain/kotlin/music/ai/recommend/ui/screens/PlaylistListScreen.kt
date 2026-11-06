@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -14,11 +16,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.ai.SmartAlbum
 import music.ai.recommend.model.Playlist
 import music.ai.recommend.model.Song
 import music.ai.recommend.ui.components.SongItem
+import music.ai.recommend.ui.components.rememberDragToReorder
+import music.ai.recommend.ui.components.reorderHandle
 
 @Composable
 fun PlaylistListScreen(
@@ -248,6 +254,35 @@ fun PlaylistListScreen(
         }
     } else {
         val playlist = selectedPlaylist!!
+        val listState = rememberLazyListState()
+        var reordering by remember(playlist.id) { mutableStateOf(false) }
+        // The order being dragged, which is this screen's for the length of the gesture and the
+        // playlist's again as soon as it is let go.
+        var ordered by remember { mutableStateOf(playlist.songs) }
+        // Saved when the mouse is lifted, when the mode is left, and when the screen goes away. The
+        // lifting is not enough on its own: a gesture can also end by having its row scrolled out of
+        // the list from under it, and a gesture that ends that way calls nothing back. Asking more
+        // than once costs nothing, because an order that is already the order is not recorded.
+        val saveOrder = { viewModel.reorderPlaylist(playlist, ordered) }
+        val reorder = rememberDragToReorder(
+            listState = listState,
+            // By the track and not by its place in the list, which is the thing being changed.
+            indexOf = { key -> ordered.indexOfFirst { it.path == key } },
+            onMove = { from, to ->
+                ordered = ordered.toMutableList().apply { add(to, removeAt(from)) }
+            },
+            onDropped = { saveOrder() }
+        )
+        LaunchedEffect(playlist.songs, reordering) {
+            // The playlist as it now stands, unless the mouse is in the middle of saying otherwise.
+            if (reorder.dragging == null) ordered = playlist.songs
+        }
+        DisposableEffect(playlist.id) {
+            onDispose { if (reordering) saveOrder() }
+        }
+        // Arranging a filtered list would be arranging something the playlist is not, so the two
+        // are not offered at once.
+        val arranging = reordering && !isSearchActive
         val songsToShow = if (isSearchActive) {
             playlist.songs.filter { 
                 it.title.contains(searchQuery, ignoreCase = true) || 
@@ -268,6 +303,18 @@ fun PlaylistListScreen(
                     }
                     Text(playlist.name, style = MaterialTheme.typography.headlineMedium)
                     Spacer(modifier = Modifier.weight(1f))
+                    IconButton(onClick = {
+                        // Any gesture still in the air is ended first, so that what it did is
+                        // saved and the row it was holding is let go of.
+                        reorder.stop()
+                        reordering = !reordering
+                        if (!reordering) saveOrder()
+                    }) {
+                        Icon(
+                            imageVector = if (arranging) Icons.Default.Check else Icons.Default.SwapVert,
+                            contentDescription = if (arranging) "Done" else "Change order"
+                        )
+                    }
                     Button(onClick = { viewModel.playSong(playlist.songs.first(), playlist.songs) }, enabled = playlist.songs.isNotEmpty()) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Text("Play All")
@@ -278,6 +325,51 @@ fun PlaylistListScreen(
             if (songsToShow.isEmpty()) {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     Text(if (isSearchActive) "No results found" else "This playlist is empty", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else if (arranging) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(16.dp)
+                ) {
+                    itemsIndexed(ordered, key = { _, song -> song.path }) { index, song ->
+                        val held = reorder.dragging == index
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                // The held row is drawn where the mouse has it, above the others
+                                // and without the placement animation the rest use to slide out of
+                                // its way — those two would be describing one row's position at
+                                // once.
+                                .zIndex(if (held) 1f else 0f)
+                                .graphicsLayer { translationY = reorder.offsetOf(index) }
+                                .then(if (held) Modifier else Modifier.animateItem())
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                SongItem(
+                                    song = song,
+                                    isActive = song.id == currentSong?.id,
+                                    isFavorite = favoritePaths.contains(song.path),
+                                    isScanned = scannedIds.contains(song.path),
+                                    onFavoriteClick = { viewModel.toggleFavorite(song) },
+                                    onPlayNext = { viewModel.playNext(song) },
+                                    onAddToEnd = { viewModel.addToEndOfQueue(song) },
+                                    onSmartPlaylist = { viewModel.createSmartPlaylist(song) },
+                                    onDelete = { viewModel.deleteSong(song) },
+                                    onShowInfo = { onShowInfo(song) },
+                                    onClick = { viewModel.playSong(song, ordered) }
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.DragHandle,
+                                contentDescription = "Drag to reorder",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .reorderHandle(reorder, song.path)
+                            )
+                        }
+                    }
                 }
             } else {
                 LazyColumn(

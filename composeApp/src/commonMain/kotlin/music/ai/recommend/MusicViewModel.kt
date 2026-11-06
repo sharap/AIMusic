@@ -646,7 +646,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val kind: PlaylistOp.Kind,
         val playlist: String? = null,
         val track: Song? = null,
-        val newName: String? = null
+        val newName: String? = null,
+        /** The whole playlist, for [PlaylistOp.Kind.ORDER]. */
+        val tracks: List<Song> = emptyList()
     )
 
     /**
@@ -669,7 +671,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                         at = at,
                         playlist = change.playlist,
                         track = change.track?.let { M3uShelf.keyOf(it) },
-                        newName = change.newName
+                        newName = change.newName,
+                        tracks = change.tracks.map { M3uShelf.keyOf(it) }
                     )
                 }
             }
@@ -761,6 +764,33 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         }
         savePlaylists()
         recordPlaylistChanges(listOf(Change(PlaylistOp.Kind.ADD, playlist.name, song)))
+    }
+
+    /**
+     * Sets the order of a playlist, as the owner has just dragged it.
+     *
+     * The whole list travels, not the move, because a position means nothing on a device whose
+     * copy of the playlist has changed since. Replay then puts what it is given first and
+     * anything it does not mention after, so a track that arrived while the list was being
+     * dragged about is at the end rather than gone.
+     *
+     * Which is also why what is shown here is not simply [songs]: the re-derivation that follows
+     * the write brings back anything that arrived meanwhile. Showing [songs] alone would drop it
+     * until the next pass.
+     */
+    fun reorderPlaylist(playlist: Playlist, songs: List<Song>) {
+        val before = _playlists.value.find { it.id == playlist.id } ?: return
+        if (before.songs.map { it.path } == songs.map { it.path }) return
+        _playlists.value = _playlists.value.map {
+            if (it.id == playlist.id) it.copy(songs = songs) else it
+        }
+        if (_selectedPlaylist.value?.id == playlist.id) {
+            _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
+        }
+        savePlaylists()
+        recordPlaylistChanges(
+            listOf(Change(PlaylistOp.Kind.ORDER, playlist = playlist.name, tracks = songs))
+        )
     }
 
     fun removeSongFromPlaylist(playlist: Playlist, song: Song) {

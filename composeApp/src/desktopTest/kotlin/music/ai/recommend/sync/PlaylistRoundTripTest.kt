@@ -227,6 +227,46 @@ class PlaylistRoundTripTest {
     }
 
     @Test
+    fun theOrderOneDeviceDraggedReachesTheOther() = runBlocking {
+        // An order is the one operation that carries a list rather than a track, so this is here
+        // to show that the list survives the whole way: written to the log, pushed as a line into
+        // the folder, read by the other device, replayed, matched against a library that knows
+        // these tracks by different paths, and shown in the order that was asked for.
+        val onPhone = Shelf(
+            PlaylistReplay.State(
+                favourites = emptyList(),
+                playlists = mapOf("вечер" to tracks.map { keyOf(it) })
+            )
+        )
+        val onDesktop = Shelf(PlaylistReplay.State(emptyList(), emptyMap()))
+        coordinator(first, onPhone).pushPlaylists(now)
+        coordinator(second, onDesktop).pullPlaylists(now)
+        assertEquals(tracks.map { it.path }, onDesktop.shownPlaylists.getValue("вечер"))
+
+        // Dragged about on the desktop: the last track to the front.
+        val wanted = listOf(tracks[2], tracks[0], tracks[1])
+        val desktopLog = PlaylistLog(File(baseDir, "log-$second.jsonl"))
+        desktopLog.append(listOf(
+            PlaylistOp(
+                kind = PlaylistOp.Kind.ORDER,
+                seq = desktopLog.nextSeq(),
+                deviceId = second,
+                at = now,
+                playlist = "вечер",
+                tracks = wanted.map { keyOf(it) }
+            )
+        ))
+        // The device that made it shows it by replaying its own log, which is what the app does
+        // after a change rather than keeping what the change did to the list.
+        coordinator(second, onDesktop).showPlaylists()
+        assertEquals(wanted.map { it.path }, onDesktop.shownPlaylists.getValue("вечер"))
+
+        coordinator(second, onDesktop).pushPlaylists(now)
+        coordinator(first, onPhone).pullPlaylists(now)
+        assertEquals(wanted.map { it.path }, onPhone.shownPlaylists.getValue("вечер"))
+    }
+
+    @Test
     fun nothingIsSeededBeforeTheLibraryIsRead() = runBlocking {
         // The one mistake here that cannot be undone: an empty log put in place and marked done.
         // Before the library is read a playlist cannot be described, because a track is named by
