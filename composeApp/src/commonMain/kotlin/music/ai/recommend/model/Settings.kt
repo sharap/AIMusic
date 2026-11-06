@@ -19,5 +19,12 @@ data class AppSettings(
     val smartAlbumsEpsScale: Float = 1f,
     val volumePercent: Int = 100,
     /** The folder listening history is exchanged through; empty when sync is not set up. */
-    val syncFolderPath: String = ""
+    val syncFolderPath: String = "",
+    /**
+     * The phrase the sync folder is sealed under, or empty for a folder in the clear.
+     *
+     * Kept in this machine's own settings, which is a file no wider than its owner. See
+     * `sync/Sealing`: what it protects is the folder, and the folder is often somewhere else.
+     */
+    val syncPhrase: String = ""
 )

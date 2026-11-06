@@ -433,6 +433,64 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                             )
                         }
 
+                        // The phrase, and what the folder looks like without one. The mix line
+                        // and this one are the only places that say anything about the folder's
+                        // own safety, and the second is the one that matters: Syncthing protects
+                        // the wire, nothing protects the folder.
+                        if (syncSummary.mixSent > 0 || syncSummary.mixTakenIn > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "Playlist of the day: sent ${syncSummary.mixSent}, " +
+                                    "taken in ${syncSummary.mixTakenIn}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            if (syncSummary.sealed)
+                                "The folder is sealed: what this machine writes can only be read " +
+                                    "with the phrase."
+                            else
+                                "The folder is plain text. Anything that can read it can read a " +
+                                    "year of listening.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        var phrase by remember { mutableStateOf("") }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = phrase,
+                                onValueChange = { phrase = it },
+                                label = { Text("Shared phrase") },
+                                placeholder = { Text("The same words on both devices") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    viewModel.setSyncPhrase(phrase)
+                                    phrase = ""
+                                },
+                                enabled = phrase.isNotBlank()
+                            ) {
+                                Text("Set")
+                            }
+                            if (syncSummary.sealed) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                OutlinedButton(onClick = {
+                                    viewModel.setSyncPhrase("")
+                                    phrase = ""
+                                }) {
+                                    Text("Clear")
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(8.dp))
                         TextButton(onClick = { viewModel.forgetSyncFolder() }) {
                             Text("Forget this folder", color = MaterialTheme.colorScheme.error)

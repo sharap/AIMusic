@@ -35,7 +35,9 @@ import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DaoVectorStore
+import music.ai.recommend.sync.GcmSealing
 import music.ai.recommend.sync.M3uShelf
+import music.ai.recommend.sync.Sealing
 import music.ai.recommend.sync.PathMixShelf
 import music.ai.recommend.sync.PlaylistLog
 import music.ai.recommend.sync.PlaylistOp
@@ -233,6 +235,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         /** Playlists of the day offered to the other devices, and taken from them. */
         val mixSent: Int = 0,
         val mixTakenIn: Int = 0,
+        /** Whether what this machine writes into the folder is sealed; see [GcmSealing]. */
+        val sealed: Boolean = false,
         /** Listens about tracks this library has not got yet; they wait rather than being lost. */
         val waiting: Int = 0,
         val busy: Boolean = false,
@@ -244,6 +248,41 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private val _syncFolderPath = MutableStateFlow("")
     val syncFolderPath: StateFlow<String> = _syncFolderPath.asStateFlow()
+
+    private val _syncPhrase = MutableStateFlow("")
+
+    /** The phrase in use and what was made from it, so a key is derived once and not per pass. */
+    private var sealingInUse: Pair<String, Sealing>? = null
+
+    /**
+     * What seals what this machine writes and opens what it reads, or null while no phrase is set.
+     *
+     * Asked on every pass rather than held, because the owner can set, correct or clear the phrase
+     * while the app is running — and what is cached is the expensive part: deriving the key takes
+     * two hundred thousand rounds of PBKDF2, and that must not happen twice.
+     */
+    private fun syncSealing(): Sealing? {
+        val phrase = _syncPhrase.value.takeIf { it.isNotEmpty() } ?: return null
+        sealingInUse?.let { (held, sealing) -> if (held == phrase) return sealing }
+        return GcmSealing(phrase).also { sealingInUse = phrase to it }
+    }
+
+    /**
+     * Sets the phrase, or clears it when given nothing.
+     *
+     * Trimmed at both ends, because the same phrase typed on two devices is the whole mechanism
+     * and a trailing space is invisible. The pass that follows writes under the new phrase and
+     * reads the folder again from the beginning: everything the other device sealed was stepped
+     * over while this one could not open it.
+     */
+    fun setSyncPhrase(text: String) {
+        val phrase = text.trim()
+        _syncPhrase.value = phrase
+        sealingInUse = null
+        _syncSummary.value = _syncSummary.value.copy(sealed = phrase.isNotEmpty())
+        saveSettings()
+        viewModelScope.launch { syncPass(force = true, takeIn = true) }
+    }
 
     /** Sync's own files — the device id and what it remembers between runs — beside the database. */
     private val syncDirectory by lazy { java.io.File(db.dataDirectory(), "sync") }
@@ -320,6 +359,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _backgroundAlpha.value = s.backgroundAlpha
             _volumePercent.value = s.volumePercent.coerceIn(0, 100)
             _syncFolderPath.value = s.syncFolderPath
+            _syncPhrase.value = s.syncPhrase
+            _syncSummary.value = _syncSummary.value.copy(sealed = s.syncPhrase.isNotEmpty())
             player.volumePercent = _volumePercent.value
             _smartAlbumsEpsScale.value = s.smartAlbumsEpsScale.coerceIn(
                 SmartAlbumClustering.MIN_EPS_SCALE, SmartAlbumClustering.MAX_EPS_SCALE
@@ -352,7 +393,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 customEqPresets = _eqPresets.value.filter { it.isCustom },
                 smartAlbumsEpsScale = _smartAlbumsEpsScale.value,
                 volumePercent = _volumePercent.value,
-                syncFolderPath = _syncFolderPath.value
+                syncFolderPath = _syncFolderPath.value,
+                syncPhrase = _syncPhrase.value
             )
             db.musicDao().saveSettings(settings)
         }
@@ -1202,6 +1244,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 onShow = { favourites, playlists -> showMergedPlaylists(favourites, playlists) }
             ),
             playlistLog = playlistLog,
+            sealing = { syncSealing() },
             mix = PathMixShelf(
                 builder = dailyMixBuilder,
                 songs = { allSongs },
