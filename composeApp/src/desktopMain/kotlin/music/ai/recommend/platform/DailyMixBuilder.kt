@@ -23,7 +23,9 @@ actual class DailyMixBuilder actual constructor() {
         val day: String = "",
         val attempt: Int = 0,
         val paths: List<String>? = null,
-        val recent: List<Day>? = null
+        val recent: List<Day>? = null,
+        /** Which device built it, or null when this one did; see `sync/MixStore`. */
+        val from: String? = null
     )
 
     private class Day(val day: String = "", val paths: List<String>? = null)
@@ -101,6 +103,7 @@ actual class DailyMixBuilder actual constructor() {
             seed = DailyMix.seedFor(today, tracks.size) + attempt,
             now = now
         )
+        // Built here, so [Stored.from] is left null: this machine is the one that may publish it.
         save(Stored(today, attempt, paths, recent))
         // Printed so that an empty playlist can be told from one that was never built.
         println(
@@ -108,6 +111,30 @@ actual class DailyMixBuilder actual constructor() {
                 "${recent.size} recent days held back"
         )
         DailyPlaylist(today, paths.mapNotNull { byPath[it] })
+    }
+
+    actual fun today(): String = LocalDate.now().toString()
+
+    actual suspend fun offered(): OfferedMix? = withContext(Dispatchers.IO) {
+        val stored = load() ?: return@withContext null
+        if (stored.day != LocalDate.now().toString()) return@withContext null
+        val paths = stored.paths.orEmpty()
+        if (paths.isEmpty()) return@withContext null
+        OfferedMix(stored.day, stored.attempt, stored.from, paths)
+    }
+
+    actual suspend fun adopt(day: String, attempt: Int, from: String, paths: List<String>) {
+        withContext(Dispatchers.IO) {
+            val stored = load()
+            val recent = buildList {
+                if (stored != null && !stored.paths.isNullOrEmpty()) {
+                    add(Day(stored.day, stored.paths))
+                }
+                addAll(stored?.recent.orEmpty().filter { it.day != stored?.day })
+            }.take(REMEMBERED_DAYS)
+            save(Stored(day, attempt, paths, recent, from))
+            println("DailyMix: $day adopted from $from: ${paths.size} tracks, attempt $attempt")
+        }
     }
 
     actual fun millisUntilNextDay(): Long {

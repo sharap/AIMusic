@@ -36,6 +36,7 @@ import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DaoVectorStore
 import music.ai.recommend.sync.M3uShelf
+import music.ai.recommend.sync.PathMixShelf
 import music.ai.recommend.sync.PlaylistLog
 import music.ai.recommend.sync.PlaylistOp
 import music.ai.recommend.sync.PlayLogStore
@@ -229,6 +230,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         /** Playlist and favourite changes offered to the other devices, and taken from them. */
         val changesSent: Int = 0,
         val changesTakenIn: Int = 0,
+        /** Playlists of the day offered to the other devices, and taken from them. */
+        val mixSent: Int = 0,
+        val mixTakenIn: Int = 0,
         /** Listens about tracks this library has not got yet; they wait rather than being lost. */
         val waiting: Int = 0,
         val busy: Boolean = false,
@@ -1198,6 +1202,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 onShow = { favourites, playlists -> showMergedPlaylists(favourites, playlists) }
             ),
             playlistLog = playlistLog,
+            mix = PathMixShelf(
+                builder = dailyMixBuilder,
+                songs = { allSongs },
+                onShow = { songs -> withContext(Dispatchers.Main) { _dailyMix.value = songs } }
+            ),
             // The whole library in one pass. Here a vector costs a map lookup and a line of text,
             // not a file open and a radio wake-up, so there is nothing to spread out — and a cache
             // that takes nine sittings to be shared is a cache nobody gets.
@@ -1357,6 +1366,26 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 }
             }
 
+            // The playlist of the day, taken in before it is offered: a machine that is about to
+            // adopt the other's mix should not first publish one of its own that is going to lose.
+            val tookMix = if (pulled == null) null else
+                runCatching { coordinator.pullMix(now) }
+                    .getOrElse { println("Sync: could not read the playlist of the day in: $it"); null }
+            val sentMix =
+                runCatching { coordinator.pushMix(now) }
+                    .getOrElse { println("Sync: could not write the playlist of the day out: $it"); null }
+            tookMix?.let {
+                if (it.adopted || it.unmatched > 0) {
+                    println(
+                        "Sync: daily mix in: ${if (it.adopted) "adopted" else "kept ours"} for " +
+                            "${it.day}, ${it.tracks} tracks here, ${it.unmatched} not"
+                    )
+                }
+            }
+            sentMix?.let {
+                if (it.written > 0) println("Sync: daily mix out: ${it.day}, attempt ${it.attempt}")
+            }
+
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
                     // Totals since this run started, not of the last pass: most passes happen on
@@ -1370,6 +1399,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     vectorsWaiting = tookVectors?.more ?: it.vectorsWaiting,
                     changesSent = it.changesSent + (sentChanges?.written ?: 0),
                     changesTakenIn = it.changesTakenIn + (tookChanges?.takenIn ?: 0),
+                    mixSent = it.mixSent + (sentMix?.written ?: 0),
+                    mixTakenIn = it.mixTakenIn + (if (tookMix?.adopted == true) 1 else 0),
                     lastRunAt = now
                 )
             }
