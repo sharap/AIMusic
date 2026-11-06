@@ -34,6 +34,9 @@ import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DaoVectorStore
+import music.ai.recommend.sync.M3uShelf
+import music.ai.recommend.sync.PlaylistLog
+import music.ai.recommend.sync.PlaylistOp
 import music.ai.recommend.sync.PlayLogStore
 import music.ai.recommend.sync.SyncCoordinator
 import music.ai.recommend.sync.SyncFolder
@@ -222,6 +225,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val vectorsTakenIn: Int = 0,
         /** True while a library's worth of vectors is still working its way across. */
         val vectorsWaiting: Boolean = false,
+        /** Playlist and favourite changes offered to the other devices, and taken from them. */
+        val changesSent: Int = 0,
+        val changesTakenIn: Int = 0,
         /** Listens about tracks this library has not got yet; they wait rather than being lost. */
         val waiting: Int = 0,
         val busy: Boolean = false,
@@ -241,6 +247,15 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     /** One pass over the folder at a time; see [syncPass]. */
     private val syncGate = Mutex()
+
+    /**
+     * Every playlist and favourite change this machine knows of, its own and the ones that arrived.
+     *
+     * The log is what travels and what the merged answer is replayed from. The visible state is
+     * still kept where it was — m3u files and a set of paths — and is overwritten by the replay on
+     * each pass, so a change made here shows at once and is agreed on later.
+     */
+    private val playlistLog by lazy { PlaylistLog(java.io.File(syncDirectory, "playlist-log.jsonl")) }
 
     /** When the folder was last read, so passes nobody asked for do not read it over and over. */
     private var lastPullAt = 0L
@@ -612,10 +627,84 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         _queue.value = emptyList()
     }
 
+    // ------------------------------------------------------------------ playlists that travel
+    //
+    // The visible state stays where it was — m3u files and a set of paths — and every change to it
+    // is also written into the log as an operation, so it can travel. A pass then replays the whole
+    // log, its own changes among them, and replaces what is shown with the result. So a change made
+    // here is visible at once and agreed on with the other device shortly after.
+
+    /** One change, before it is given a device, a counter and a time. */
+    private data class Change(
+        val kind: PlaylistOp.Kind,
+        val playlist: String? = null,
+        val track: Song? = null,
+        val newName: String? = null
+    )
+
+    /**
+     * Writes changes into the log, which numbers them as it writes.
+     *
+     * Numbering is the log's to do and not this method's: taking a counter and writing with it are
+     * two steps, and a sync pass can write between them.
+     */
+    private fun recordPlaylistChanges(changes: List<Change>) {
+        if (changes.isEmpty()) return
+        viewModelScope.launch(Dispatchers.Default) {
+            val deviceId = syncDeviceId() ?: return@launch
+            val at = nowMs()
+            playlistLog.appendOwn { firstSeq ->
+                changes.mapIndexed { index, change ->
+                    PlaylistOp(
+                        kind = change.kind,
+                        seq = firstSeq + index,
+                        deviceId = deviceId,
+                        at = at,
+                        playlist = change.playlist,
+                        track = change.track?.let { M3uShelf.keyOf(it) },
+                        newName = change.newName
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Replaces what this machine shows with what the log says, once a pass has merged it.
+     *
+     * A playlist keeps the id it already had, so that whatever is selected stays selected; a new
+     * one is given the id its name would get when read back off disk.
+     */
+    private suspend fun showMergedPlaylists(
+        favourites: List<String>,
+        playlists: Map<String, List<String>>
+    ) {
+        val byPath = allSongs.associateBy { it.path }
+        val byName = _playlists.value.associateBy { it.name }
+        val merged = playlists.map { (name, paths) ->
+            Playlist(
+                id = byName[name]?.id ?: name.hashCode().toLong(),
+                name = name,
+                songs = paths.mapNotNull { byPath[it] }
+            )
+        }
+        withContext(Dispatchers.Main) {
+            _favoriteSongPaths.value = favourites.toSet()
+            _playlists.value = merged
+            _selectedPlaylist.value = _selectedPlaylist.value?.let { chosen ->
+                merged.find { it.name == chosen.name }
+            }
+        }
+        savePlaylists()
+        saveFavorites()
+    }
+
     fun createPlaylist(name: String) {
         val newPlaylist = Playlist(id = System.currentTimeMillis(), name = name, songs = emptyList())
         _playlists.value = _playlists.value + newPlaylist
         savePlaylists()
+        // Created explicitly, so that a playlist made empty is still a playlist on the other side.
+        recordPlaylistChanges(listOf(Change(PlaylistOp.Kind.CREATE, playlist = name)))
     }
 
     fun deletePlaylist(playlist: Playlist) {
@@ -624,6 +713,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _selectedPlaylist.value = null
         }
         savePlaylists()
+        recordPlaylistChanges(listOf(Change(PlaylistOp.Kind.DELETE, playlist = playlist.name)))
     }
 
     fun selectPlaylist(playlist: Playlist?) {
@@ -640,6 +730,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
         }
         savePlaylists()
+        recordPlaylistChanges(listOf(Change(PlaylistOp.Kind.ADD, playlist.name, song)))
     }
 
     fun removeSongFromPlaylist(playlist: Playlist, song: Song) {
@@ -652,17 +743,18 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _selectedPlaylist.value = _playlists.value.find { it.id == playlist.id }
         }
         savePlaylists()
+        recordPlaylistChanges(listOf(Change(PlaylistOp.Kind.REMOVE, playlist.name, song)))
     }
 
     fun toggleFavorite(song: Song) {
         val current = _favoriteSongPaths.value.toMutableSet()
-        if (current.contains(song.path)) {
-            current.remove(song.path)
-        } else {
-            current.add(song.path)
-        }
+        val added = !current.remove(song.path)
+        if (added) current.add(song.path)
         _favoriteSongPaths.value = current
         saveFavorites()
+        recordPlaylistChanges(
+            listOf(Change(if (added) PlaylistOp.Kind.ADD else PlaylistOp.Kind.REMOVE, track = song))
+        )
     }
 
     fun isFavorite(songPath: String): Boolean {
@@ -1039,6 +1131,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             keepDays = HISTORY_KEEP_DAYS.toInt(),
             note = { println("Sync: $it") },
             vectors = DaoVectorStore(db.musicDao(), { allSongs }, models.audioModelSha256()),
+            playlists = M3uShelf(
+                songs = { allSongs },
+                favouritePaths = { _favoriteSongPaths.value },
+                storedPlaylists = { _playlists.value.map { it.name to it.songs.map { song -> song.path } } },
+                onShow = { favourites, playlists -> showMergedPlaylists(favourites, playlists) }
+            ),
+            playlistLog = playlistLog,
             // The whole library in one pass. Here a vector costs a map lookup and a line of text,
             // not a file open and a radio wake-up, so there is nothing to spread out — and a cache
             // that takes nine sittings to be shared is a cache nobody gets.
@@ -1155,6 +1254,26 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 }
             }
 
+            val sentChanges = if (pulled == null) null else
+                runCatching { coordinator.pushPlaylists(now) }
+                    .getOrElse { println("Sync: could not write the playlist changes out: $it"); null }
+            val tookChanges = if (pulled == null) null else
+                runCatching { coordinator.pullPlaylists(now) }
+                    .getOrElse { println("Sync: could not read the playlist changes in: $it"); null }
+            sentChanges?.let {
+                if (it.written + it.seeded > 0) {
+                    println("Sync: playlists out: ${it.written} written, ${it.seeded} seeded from what was here")
+                }
+            }
+            tookChanges?.let {
+                if (it.takenIn > 0 || it.unmatched > 0) {
+                    println(
+                        "Sync: playlists in: ${it.takenIn} changes, ${it.favourites} favourites, " +
+                            "${it.playlists} playlists, ${it.unmatched} tracks not here"
+                    )
+                }
+            }
+
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
                     // Totals since this run started, not of the last pass: most passes happen on
@@ -1166,6 +1285,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     vectorsSent = it.vectorsSent + (sentVectors?.written ?: 0),
                     vectorsTakenIn = it.vectorsTakenIn + (tookVectors?.takenIn ?: 0),
                     vectorsWaiting = tookVectors?.more ?: it.vectorsWaiting,
+                    changesSent = it.changesSent + (sentChanges?.written ?: 0),
+                    changesTakenIn = it.changesTakenIn + (tookChanges?.takenIn ?: 0),
                     lastRunAt = now
                 )
             }

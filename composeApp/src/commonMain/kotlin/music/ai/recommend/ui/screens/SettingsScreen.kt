@@ -413,6 +413,16 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                         // Vectors get a line of their own, and only once something has moved: for
                         // most people this is a one-off backfill they should be able to watch
                         // finish, and after that a line that always reads zero would be noise.
+                        // Playlist changes get their own line, and only once something has moved.
+                        if (syncSummary.changesSent > 0 || syncSummary.changesTakenIn > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "Playlists: sent ${syncSummary.changesSent}, " +
+                                    "taken in ${syncSummary.changesTakenIn}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         if (syncSummary.vectorsSent > 0 || syncSummary.vectorsTakenIn > 0) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(

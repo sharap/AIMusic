@@ -45,6 +45,29 @@ class PlaylistRoundTripTest {
         durationMs = song.duration
     )
 
+    @Test
+    fun theShelfDescribesWhatThisMachineHasAndFindsItAgain() = runBlocking {
+        // This port's own end of it: a playlist here is a list of paths, and a path on one machine
+        // says nothing about where the same music sits on the other, so what travels is the tags.
+        val shelf = M3uShelf(
+            songs = { tracks },
+            favouritePaths = { setOf(tracks[1].path) },
+            storedPlaylists = { listOf("вечер" to listOf(tracks[0].path)) },
+            onShow = { _, _ -> }
+        )
+        val described = shelf.current()!!
+        assertEquals(listOf(keyOf(tracks[1])), described.favourites)
+        assertEquals(mapOf("вечер" to listOf(keyOf(tracks[0]))), described.playlists)
+
+        val matcher = TrackMatcher(tracks.map { TrackMatcher.Entry(it.path, keyOf(it)) })
+        assertEquals(tracks[1].path, matcher.resolve(described.favourites.single()))
+
+        // And a machine that has none of it describes nothing rather than an empty shelf, so the
+        // first pass has nothing to seed and says so.
+        val bare = M3uShelf({ tracks }, { emptySet() }, { emptyList() }, { _, _ -> })
+        assertEquals(null, bare.current())
+    }
+
     /** A device's playlists: what it had before any of this, and what it is shown afterwards. */
     private class Shelf(
         private val had: PlaylistReplay.State?
