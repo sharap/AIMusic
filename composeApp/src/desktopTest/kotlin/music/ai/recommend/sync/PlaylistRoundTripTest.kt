@@ -204,6 +204,20 @@ class PlaylistRoundTripTest {
     }
 
     @Test
+    fun nothingIsSeededBeforeTheLibraryIsRead() = runBlocking {
+        // The one mistake here that cannot be undone: an empty log put in place and marked done.
+        // Before the library is read a playlist cannot be described, because a track is named by
+        // its tags, so the pass has to wait rather than conclude that there was nothing.
+        val shelf = Shelf(PlaylistReplay.State(emptyList(), mapOf("вечер" to listOf(keyOf(tracks[0])))))
+        val tooEarly = coordinator(first, shelf, library = emptyList()).pushPlaylists(now)
+        assertEquals(0, tooEarly.seeded)
+        assertEquals(0, shelf.timesAsked)
+
+        // And once it is read, the seeding happens as it should.
+        assertEquals(2, coordinator(first, shelf).pushPlaylists(now).seeded)
+    }
+
+    @Test
     fun nothingHappensWithoutAFolder() = runBlocking {
         val shelf = Shelf(PlaylistReplay.State(emptyList(), mapOf("вечер" to listOf(keyOf(tracks[0])))))
         val adrift = SyncCoordinator(
