@@ -26,6 +26,7 @@ import music.ai.recommend.history.PlayTracker
 import music.ai.recommend.db.PlayEventEntity
 import music.ai.recommend.platform.PlaybackRemote
 import music.ai.recommend.platform.RemoteControlService
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
@@ -250,6 +251,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     /** The wait after a playlist change before it is sent; see [settlePlaylists]. */
     private var playlistSettling: kotlinx.coroutines.Job? = null
+
+    /** Whether the window is in front of the owner right now; see [observeSync]. */
+    private val foreground = MutableStateFlow(false)
 
     /**
      * Every playlist and favourite change this machine knows of, its own and the ones that arrived.
@@ -669,6 +673,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     )
                 }
             }
+            // What is shown is the replay of the log, so it is re-derived here rather than left as
+            // whatever the mutation did to it. Two things come out of that: a pass can no longer
+            // take away a change made here, and a change the log refused does not appear to have
+            // worked and then vanish at the next pass.
+            runCatching { coordinator()?.showPlaylists() }
             settlePlaylists()
         }
     }
@@ -1199,6 +1208,23 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 wasScanning = scanning
             }
         }
+        viewModelScope.launch {
+            // While the window is in front of the owner, the folder is read every so often.
+            //
+            // Every other moment that reads it is something the owner did — stopped playback, came
+            // back to the window — and there is one case none of them covers: looking at the
+            // screen. A playlist open here while it is changed on the phone would sit there
+            // unchanged, because watching it causes nothing. Found exactly that way.
+            //
+            // The interval is the governor rather than the throttle, which is why these passes are
+            // not throttled.
+            foreground.collectLatest { inFront ->
+                while (inFront) {
+                    delay(FOREGROUND_POLL_MS)
+                    syncPass(force = false, takeIn = true)
+                }
+            }
+        }
         refreshSyncSummary()
     }
 
@@ -1351,7 +1377,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
      * window says nothing new about what was played.
      */
     fun syncOnOpen() {
+        foreground.value = true
         viewModelScope.launch { syncPass(force = false, takeIn = true, throttled = true) }
+    }
+
+    /** The window is no longer in front of the owner, so the slow reading of the folder stops. */
+    fun syncOnLeave() {
+        foreground.value = false
     }
 
     /** A pass the owner asked for, which is the same pass with a spinner on it. */
@@ -1468,6 +1500,15 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
          * one write.
          */
         const val PLAYLIST_SETTLE_MS = 5_000L
+
+        /**
+         * How often the folder is read while the window is in front of the owner.
+         *
+         * Fifteen seconds is the compromise: a change made on the other device shows up while the
+         * owner is still looking at the screen. Here it costs a directory listing; the phone at the
+         * other end of the same folder pays a little more, and nothing at all when its app is away.
+         */
+        const val FOREGROUND_POLL_MS = 15_000L
         const val DAY_MS = 24L * 60 * 60 * 1000
     }
 

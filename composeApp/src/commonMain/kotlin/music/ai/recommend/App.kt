@@ -77,7 +77,7 @@ fun App(
     // pass itself refuses to read the folder more than once a minute.
     val windowFocused = LocalWindowInfo.current.isWindowFocused
     LaunchedEffect(windowFocused) {
-        if (windowFocused) viewModel.syncOnOpen()
+        if (windowFocused) viewModel.syncOnOpen() else viewModel.syncOnLeave()
     }
 
     val folders by viewModel.folders.collectAsState()
