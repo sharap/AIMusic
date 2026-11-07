@@ -1,7 +1,7 @@
 package music.ai.recommend.sync
 
 import music.ai.recommend.ai.Excerpt
-import music.ai.recommend.ai.Mp3Excerpt
+import music.ai.recommend.ai.SharedDecoder
 import music.ai.recommend.db.ANALYSIS_VERSION
 import music.ai.recommend.db.EMBEDDING_DIMENSIONS
 import music.ai.recommend.db.EmbeddingEntity
@@ -45,14 +45,14 @@ class DaoVectorStore(
     )
 
     override suspend fun decoderFor(track: String): String =
-        if (Mp3Excerpt.handles(track)) Mp3Excerpt.DECODER else PLATFORM
+        SharedDecoder.of(track) ?: PLATFORM
 
     override suspend fun excerptStartMs(track: String): Long? {
         // For a format the shared decoder handles, the decoder's own count of the samples — which
         // is what it chose the window by. The tag reader's whole seconds are a different number,
         // and naming the window with them is how a correct vector comes to be refused: measured
         // against one phone, about a quarter of a library came out one two-second bucket apart.
-        if (Mp3Excerpt.handles(track)) return Mp3Excerpt.startMs(java.io.File(track))
+        SharedDecoder.startMs(java.io.File(track))?.let { return it }
         val duration = durationOf(track) ?: return null
         return Excerpt.startMs(duration)
     }

@@ -14,7 +14,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
 import music.ai.recommend.ai.Excerpt
-import music.ai.recommend.ai.Mp3Excerpt
+import music.ai.recommend.ai.SharedDecoder
 import music.ai.recommend.db.AppDatabase
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.getAppDatabase
@@ -237,18 +237,22 @@ actual class AiScanner actual constructor() {
     /**
      * The excerpt, from whichever decoder is right for the file.
      *
-     * mp3 goes to [Mp3Excerpt], which is the same code the Android app runs, because the platform
-     * decoders do not agree on where an mp3 frame sits: measured against ffmpeg, Android's begins
-     * its output 576 samples later and its seek over a variable bitrate lands hundreds of samples
-     * further off again, which is enough to make an embedding from one device useless on the
-     * other. Everything else still goes through ffmpeg, and its embeddings stay on this machine
-     * until there is a shared decoder for those formats too.
+     * mp3, flac and wav go to the shared decoders in `ai/`, which are the same code the Android
+     * app runs. For mp3 the platform decoders disagree about where a frame sits — measured against
+     * ffmpeg, Android's begins its output 576 samples later and its seek over a variable bitrate
+     * lands hundreds of samples further off again. For flac the samples do agree, being lossless,
+     * but everything around them does not: this side used to hand ffmpeg a start in seconds and
+     * ask it for 48 kHz, so its own resampler ran where the phone runs [Excerpt.resample]. Either
+     * way an embedding from one device was useless on the other.
+     *
+     * What is left for ffmpeg is m4a and the rest, whose embeddings stay on this machine until
+     * those formats have a shared decoder too.
      */
     private fun decodeExcerpt(path: String, durationMs: Long): FloatArray {
-        if (Mp3Excerpt.handles(path)) {
-            val samples = runCatching { Mp3Excerpt.decode(File(path)) }.getOrElse { FloatArray(0) }
+        if (SharedDecoder.handles(path)) {
+            val samples = runCatching { SharedDecoder.decode(File(path)) }.getOrElse { FloatArray(0) }
             if (samples.isNotEmpty()) return samples
-            println("AiScanner: shared mp3 decoder gave nothing for $path, using ffmpeg")
+            println("AiScanner: shared decoder gave nothing for $path, using ffmpeg")
         }
         return audioDecoder.decodeChunk(path, CHUNK_MS, durationMs)
     }
