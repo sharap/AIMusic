@@ -28,6 +28,7 @@ kotlin {
                 // decoders disagree with each other by tens of milliseconds on where an mp3 frame
                 // sits, which is enough to make an embedding from one device useless on the other.
                 implementation(libs.jlayer)
+                implementation(libs.jcodec)
             }
         }
         

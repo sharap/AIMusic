@@ -70,7 +70,9 @@ class VectorRoundTripTest {
             // is on purpose.
             song(believer.path, "Imagine Dragons", "Believer", 207_000),
             song(mare.path, "", "", 210_000),
-            song(File(music, "01 - Atlantia.m4a").path, "Secret Garden", "Atlantia", 179_000)
+            // An ogg: one of the formats still left to the platform, so its vectors stay at
+            // home. It was an m4a until m4a gained a shared decoder.
+            song(File(music, "01 - Atlantia.ogg").path, "Secret Garden", "Atlantia", 179_000)
         )
     }
 
@@ -134,7 +136,7 @@ class VectorRoundTripTest {
 
     @Test
     fun aVectorFromAFormatWithoutASharedDecoderNeverLeaves() = runBlocking {
-        analysed(2)                            // the m4a
+        analysed(2)                            // the ogg
         val pushed = coordinator(first).pushVectors(now)
         assertEquals(0, pushed.written)
         assertEquals(1, pushed.couldNotTravel)

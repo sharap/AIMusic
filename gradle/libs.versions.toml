@@ -25,6 +25,8 @@ jaudiotagger = "3.0.1"
 
 [libraries]
 jlayer = { group = "javazoom", name = "jlayer", version = "1.0.1" }
+# The pure-Java AAC decoder, which jcodec carries as net.sourceforge.jaad.aac.
+jcodec = { group = "org.jcodec", name = "jcodec", version = "0.2.5" }
 jaudiotagger = { group = "net.jthink", name = "jaudiotagger", version = "3.0.1" }
 vlcj = { group = "uk.co.caprica", name = "vlcj", version.ref = "vlcj" }
 dbus-java-core = { group = "com.github.hypfvieh", name = "dbus-java-core", version.ref = "dbusJava" }
