@@ -456,6 +456,14 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                                     "year of listening.",
                             style = MaterialTheme.typography.bodySmall
                         )
+                        if (syncSummary.unopened > 0) {
+                            Text(
+                                "${syncSummary.unopened} batches would not open. The phrase here " +
+                                    "is probably not the phrase there.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         var phrase by remember { mutableStateOf("") }
                         Row(

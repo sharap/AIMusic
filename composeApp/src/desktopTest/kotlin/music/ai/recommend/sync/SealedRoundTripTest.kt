@@ -56,6 +56,9 @@ class SealedRoundTripTest {
 
     private val dao by lazy { DesktopMusicDao(File(baseDir, "data")) }
 
+    /** What the coordinator said was worth noticing, so a silent failure can be caught. */
+    private val said = ArrayList<String>()
+
     private fun coordinator(
         deviceId: String,
         sealing: Sealing? = GcmSealing(phrase)
@@ -64,6 +67,7 @@ class SealedRoundTripTest {
         state = SyncState.load(File(baseDir, "state-$deviceId.json")),
         store = PlayLogStore(dao, { songs }),
         folder = { FileSyncFolder(folder, deviceId) },
+        note = { said.add(it) },
         sealing = { sealing }
     )
 
@@ -112,9 +116,26 @@ class SealedRoundTripTest {
         assertEquals(0, stranger.pull(now).takenIn)
         assertEquals(0, dao.playEventsFromOtherDevices(0).size)
 
-        // Nor does a device with no phrase at all, which is the same thing from the folder's side.
-        assertEquals(0, coordinator(second, null).pull(now).takenIn)
+        // And it says so. This is the one way the whole arrangement fails — the phrase typed here
+        // is not the phrase typed there — and it would otherwise fail in silence: a batch that
+        // does not open is counted as unreadable and stepped over, like a half-written line.
+        assertEquals(1, stranger.unopenedBatches)
+        assertTrue(said.any { it.contains("Could not open") }, said.toString())
+
+        // A device with no phrase at all is the same thing from the folder's side, and is told the
+        // same way.
+        val without = coordinator(second, null)
+        assertEquals(0, without.pull(now).takenIn)
         assertEquals(0, dao.playEventsFromOtherDevices(0).size)
+        assertEquals(1, without.unopenedBatches)
+
+        // And none of those passes wrote the batch off: a line that did not open is left
+        // unconsumed, so the device that gets the phrase right afterwards finds it still there.
+        // Nothing else would — the state's name for the phrase covers a change of phrase, and
+        // this covers the one failure that leaves no trace to change.
+        val state = File(baseDir, "state-$second.json").readText()
+        assertTrue(state.contains("2026-11-05.jsonl\":0"), state)
+        assertEquals(1, coordinator(second).pull(now).takenIn)
     }
 
     @Test
