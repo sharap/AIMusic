@@ -148,6 +148,55 @@ actual class AiScanner actual constructor() {
      *
      * @return true when something arrived, so the caller knows to look again.
      */
+    /**
+     * Stands aside while a conversation with the other device is open, and says that it is.
+     *
+     * The analysis holds a permit and runs the model; a conversation at the same time is two jobs
+     * on one processor, and the one arriving over the socket is work somebody else has already
+     * done. Between tracks and not inside one, so whatever is being decoded now finishes.
+     *
+     * Measured on the pair this was written against: a round of fifty vectors took 0.6 s while the
+     * other device was analysing and 0.35 s while it was not. Polled briskly rather than once a
+     * second, because the signal includes this device's own dial attempts and a failing one lasts
+     * milliseconds; bounded by [ASIDE_ROUNDS] rather than by trust in the socket.
+     */
+    private suspend fun stepAsideForTheConversation(
+        done: Int,
+        total: Int,
+        onProgress: (Float, String, Int, Long) -> Unit
+    ) {
+        if (!PeerPresence.conversationInFlight()) return
+        val from = System.currentTimeMillis()
+        var held = db.musicDao().getAllEmbeddings().size
+        var movedAt = from
+        var rounds = 0
+        while (!isStopping && PeerPresence.conversationInFlight() && rounds++ < ASIDE_ROUNDS) {
+            // Said, so that an analysis which has visibly stopped says why it has stopped.
+            val dealtWith = db.musicDao().dealtWithNow() ?: done
+            onProgress(
+                dealtWith.toFloat() / total.coerceAtLeast(1),
+                "Taking what the other device already has...",
+                dealtWith,
+                -1L
+            )
+            delay(ASIDE_POLL_MS)
+            val now = db.musicDao().getAllEmbeddings().size
+            if (now > held) {
+                held = now
+                movedAt = System.currentTimeMillis()
+            } else if (System.currentTimeMillis() - movedAt >= ASIDE_QUIET_MS) {
+                // The socket is open and nothing is coming down it, which is what the other device
+                // disappearing looks like from here: a dropped peer holds a connection until the
+                // read times out, twenty seconds, and there is work here that nobody is sending.
+                break
+            }
+        }
+        println(
+            "AiScanner: stood aside for ${System.currentTimeMillis() - from} ms; " +
+                "$held vectors held when the analysis resumed"
+        )
+    }
+
     private suspend fun letVectorsArrive(waiting: Int, onArrival: (Int) -> Unit): Boolean {
         if (waiting == 0) return false
         // Nobody has announced themselves, so there is nobody to ask and nothing to wait for; see
@@ -256,13 +305,26 @@ actual class AiScanner actual constructor() {
                     if (isStopping || fatalError != null) return@async
                     semaphore.withPermit {
                         if (isStopping || fatalError != null) return@async
+                        stepAsideForTheConversation(
+                            alreadyScannedCount + processedInThisSession.get(),
+                            songs.size,
+                            onProgress
+                        )
+                        if (isStopping || fatalError != null) return@async
                         try {
                             withTimeoutOrNull(45.seconds) {
-                                val currentIdx = processedInThisSession.get()
+                                // What this machine has dealt with now, asked afresh, and not
+                                // the count taken when the analysis started plus what it has done
+                                // since. The stale version is how a bar collapses from nine tenths
+                                // to a twentieth the moment a handover ends: the vectors that just
+                                // arrived are missing from the baseline, so the screen forgets
+                                // them. Same quantity the handover itself reports.
+                                val dealtWith = db.musicDao().dealtWithNow()
+                                    ?: (alreadyScannedCount + processedInThisSession.get())
                                 onProgress(
-                                    (alreadyScannedCount + currentIdx).toFloat() / songs.size,
+                                    dealtWith.toFloat() / songs.size,
                                     "Analyzing: ${song.title}",
-                                    alreadyScannedCount + currentIdx,
+                                    dealtWith,
                                     -1L
                                 )
 
@@ -302,10 +364,12 @@ actual class AiScanner actual constructor() {
                             val remainingCount = totalToProcess - currentCount
                             val etrSeconds = (remainingCount * avgTimePerSong) / 1000
 
+                            val dealtWithNow = db.musicDao().dealtWithNow()
+                                ?: (alreadyScannedCount + currentCount)
                             onProgress(
-                                (alreadyScannedCount + currentCount).toFloat() / songs.size,
+                                dealtWithNow.toFloat() / songs.size,
                                 song.title,
-                                alreadyScannedCount + currentCount,
+                                dealtWithNow,
                                 etrSeconds
                             )
 
@@ -404,6 +468,21 @@ actual class AiScanner actual constructor() {
          * a number. See [letVectorsArrive].
          */
         private const val ARRIVAL_PAUSE_MS = 1_000L
+
+        /** How often the pause between tracks looks up; see [stepAsideForTheConversation]. */
+        private const val ASIDE_POLL_MS = 200L
+
+        /** The same five minutes as [MOST_ROUNDS], counted in the briefer poll above. */
+        private const val ASIDE_ROUNDS = 1_500
+
+        /**
+         * How long the pause tolerates an open conversation that is sending nothing.
+         *
+         * Three seconds, against a round of fifty vectors measured at 0.35 s: five slow rounds, so
+         * a live handover is never cut short, while a peer that vanished mid-conversation does not
+         * cost the twenty idle seconds its socket takes to time out.
+         */
+        private const val ASIDE_QUIET_MS = 3_000L
 
         /**
          * Something has arrived, so wait for the stream to really stop. Ten seconds of quiet,

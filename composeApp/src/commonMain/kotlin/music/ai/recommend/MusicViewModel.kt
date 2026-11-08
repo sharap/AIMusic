@@ -1149,7 +1149,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             try {
                 aiScanner.scanSongs(songsToScan) { progress, status, scannedCount, etr ->
                     viewModelScope.launch {
-                        _aiScanProgress.value = progress
+                        // Clamped, because the table can hold rows for tracks the library no
+                        // longer has — a file deleted between one scan and the next — and a bar
+                        // past its end is a bug the eye reads before any number does.
+                        _aiScanProgress.value = progress.coerceIn(0f, 1f)
                         val etrText = formatEtr(etr)
                         _aiScanStatus.value = if (etrText.isNotEmpty()) "$status $etrText" else status
                     }
@@ -1558,7 +1561,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // see PeerPresence.
                 PeerPresence.offer(
                     near = { transport.somebodyNear() },
-                    conversations = { transport.conversationsHad() }
+                    conversations = { transport.conversationsHad() },
+                    inFlight = { transport.conversationInFlight() }
                 )
             }
         }
