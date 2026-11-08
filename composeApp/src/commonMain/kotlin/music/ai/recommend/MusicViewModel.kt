@@ -27,6 +27,7 @@ import music.ai.recommend.platform.ModelDownloader
 import music.ai.recommend.platform.ModelProgress
 import music.ai.recommend.history.PlayEvent
 import music.ai.recommend.history.PlayTracker
+import music.ai.recommend.db.MusicDao
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.PlayEventEntity
 import music.ai.recommend.platform.PlaybackRemote
@@ -44,6 +45,7 @@ import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DirectoryPeerFiles
 import music.ai.recommend.sync.PeerClient
 import music.ai.recommend.sync.PeerFiles
+import music.ai.recommend.sync.PeerPresence
 import music.ai.recommend.sync.PeerTransport
 import music.ai.recommend.sync.DaoVectorStore
 import music.ai.recommend.sync.GcmSealing
@@ -563,16 +565,24 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             val held = db.musicDao().soundPrints()
             val wanted = SoundPrint.missing(
                 tracks = library,
-                held = held.mapValues { (_, row) -> row.first },
+                // Only rows that actually carry a print count as having one. A row may hold a
+                // stamp and an excerpt start and no print at all — naming an excerpt is asked of
+                // every track a peer mentions, hashing only of the ones about to be analysed — and
+                // reading such a row as "already hashed" is how a track quietly never gets one.
+                held = held.mapNotNull { (path, row) -> row.print?.let { path to row.stamp } }.toMap(),
                 stampOf = { path -> stampOf(path) }
             )
             if (wanted.isEmpty()) return@withContext 0
-            val taken = LinkedHashMap<String, Pair<String, String>>()
+            val taken = LinkedHashMap<String, MusicDao.FilePrint>()
             for (path in wanted) {
                 val stamp = stampOf(path)
                 if (stamp.isEmpty()) continue
                 val print = SoundPrint.of(java.io.File(path)) ?: continue
-                taken[path] = stamp to print
+                taken[path] = MusicDao.FilePrint(
+                    stamp = stamp,
+                    print = print,
+                    excerptStartMs = held[path]?.takeIf { it.stamp == stamp }?.excerptStartMs
+                )
             }
             if (taken.isNotEmpty()) {
                 db.musicDao().rememberSoundPrints(taken)
@@ -598,7 +608,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
      * recognised the sound as one it already had and dropped it as nothing new.
      */
     private suspend fun fillTwinVectors(): Int {
-        val prints = db.musicDao().soundPrints().mapValues { (_, held) -> held.second }
+        val prints = db.musicDao().soundPrints().mapNotNull { (path, held) ->
+            held.print?.let { path to it }
+        }.toMap()
         if (prints.isEmpty()) return 0
         val rows = db.musicDao().getAllEmbeddings()
         val held = rows.filter { it.vector.isNotEmpty() }.associateBy { it.path }
@@ -1526,8 +1538,29 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // No LocalNetwork here: a VPN on a desktop leaves the routes of its own subnet
                 // alone, so a socket to the phone next door goes out of the right interface
                 // without being told. A phone's VPN takes the whole table; see LocalNetwork.
+                //
+                // What this machine is short of, announced so that a device which cannot dial can
+                // still ask. Usually that is the phone and not this, but a desktop behind its own
+                // firewall is in the same position, and the asking costs one number in a datagram
+                // that is sent anyway.
+                vectorsWanted = {
+                    val dealtWith = db.musicDao().dealtWithNow()
+                    if (dealtWith == null) 0 else (allSongs.size - dealtWith).coerceAtLeast(0)
+                },
+                onPeerInNeed = { peer ->
+                    println("Peer: ${peer.deviceId.take(8)} is missing ${peer.wanted} vectors; dialling")
+                    viewModelScope.launch { syncPass(force = true, takeIn = true) }
+                },
                 note = { line -> println("Peer: $line") }
-            )
+            ).also { transport ->
+                // So that the scan can ask whether waiting for vectors is waiting for anybody.
+                // Through a holder because the scanner is an expect class built with no arguments;
+                // see PeerPresence.
+                PeerPresence.offer(
+                    near = { transport.somebodyNear() },
+                    conversations = { transport.conversationsHad() }
+                )
+            }
         }
     }
 
@@ -1609,7 +1642,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 dao = db.musicDao(),
                 songs = { allSongs },
                 keepDays = HISTORY_KEEP_DAYS,
-                prints = { db.musicDao().soundPrints().mapValues { (_, held) -> held.second } }
+                prints = {
+                    db.musicDao().soundPrints().mapNotNull { (path, held) ->
+                        held.print?.let { path to it }
+                    }.toMap()
+                }
             ),
             folder = { syncFolder() },
             keepDays = HISTORY_KEEP_DAYS.toInt(),
@@ -1662,6 +1699,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // out as one piece. A limit is right for a pass nobody asked for; here the work has
                 // just been done, the machine is already busy, and holding the rest back until
                 // somebody happens to come back to the window is what makes this feel jerky.
+                // The moment it starts, because the other device may already hold what this one
+                // is about to spend an hour computing. The scan waits for whatever is on its way;
+                // see AiScanner.letVectorsArrive.
+                if (!wasScanning && scanning) {
+                    syncPass(force = true, takeIn = true)
+                }
                 if (wasScanning && !scanning) {
                     syncPass(force = true, takeIn = true, allVectors = true)
                 }

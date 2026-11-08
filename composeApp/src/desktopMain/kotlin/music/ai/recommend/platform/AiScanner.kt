@@ -11,6 +11,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import music.ai.recommend.sync.PeerPresence
 import music.ai.recommend.ai.AnalysisBacklog
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
@@ -20,6 +21,8 @@ import music.ai.recommend.db.AppDatabase
 import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.db.DesktopMusicDao
+import kotlinx.coroutines.delay
+import music.ai.recommend.ai.SoundPrint
 import music.ai.recommend.model.Song
 import java.io.File
 import java.nio.FloatBuffer
@@ -90,6 +93,95 @@ actual class AiScanner actual constructor() {
         ortEnv = null
     }
 
+    /**
+     * Names the backlog by its sound, so that what is asked for can be recognised.
+     *
+     * Cheap enough to do for the whole backlog: measured at 0.19 ms a file here. The prints are
+     * usually already there — the library pass takes them — and this is for the tracks that have
+     * only just appeared.
+     */
+    private suspend fun takePrints(songs: List<music.ai.recommend.model.Song>) {
+        if (songs.isEmpty()) return
+        try {
+            val library = songs.associate { it.path to it.path }
+            val held = db.musicDao().soundPrints()
+            val wanted = SoundPrint.missing(
+                tracks = library,
+                // Only rows that actually carry a print count as having one. A row may hold a
+                // stamp and an excerpt start and no print at all — naming an excerpt is asked of
+                // every track a peer mentions, hashing only of the ones about to be analysed — and
+                // reading such a row as "already hashed" is how a track quietly never gets one.
+                held = held.mapNotNull { (path, row) -> row.print?.let { path to row.stamp } }.toMap(),
+                stampOf = ::stampOf
+            )
+            if (wanted.isEmpty()) return
+            val taken = LinkedHashMap<String, music.ai.recommend.db.MusicDao.FilePrint>()
+            for (path in wanted) {
+                val stamp = stampOf(path)
+                if (stamp.isEmpty()) continue
+                val print = SoundPrint.of(File(path)) ?: continue
+                taken[path] = music.ai.recommend.db.MusicDao.FilePrint(
+                    stamp = stamp,
+                    print = print,
+                    excerptStartMs = held[path]?.takeIf { it.stamp == stamp }?.excerptStartMs
+                )
+            }
+            if (taken.isNotEmpty()) db.musicDao().rememberSoundPrints(taken)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            println("AiScanner: could not take the prints of the backlog: ${e.message}")
+        }
+    }
+
+    /**
+     * Waits while vectors are still arriving from the other device, and no longer.
+     *
+     * The moment a scan starts, the app asks its peer for everything this machine is missing, and
+     * what comes back costs nothing to use. Analysing a track the other device has already
+     * analysed is the one kind of work here that is purely wasted.
+     *
+     * Bounded by what is actually happening rather than by a timer: while the number of vectors
+     * held keeps growing, something is being handed over and waiting is right; the first quiet
+     * moment means there is nobody to wait for, which is also the answer when there is no other
+     * device at all.
+     *
+     * @return true when something arrived, so the caller knows to look again.
+     */
+    private suspend fun letVectorsArrive(waiting: Int, onArrival: (Int) -> Unit): Boolean {
+        if (waiting == 0) return false
+        // Nobody has announced themselves, so there is nobody to ask and nothing to wait for; see
+        // PeerPresence. A library with one device pays nothing at all for this.
+        if (!PeerPresence.somebodyNear()) return false
+        val conversationsBefore = PeerPresence.conversationsHad()
+        var held = db.musicDao().getAllEmbeddings().size
+        val before = held
+        var quiet = 0
+        var rounds = 0
+        while (!isStopping && rounds++ < MOST_ROUNDS) {
+            delay(ARRIVAL_PAUSE_MS)
+            val now = db.musicDao().getAllEmbeddings().size
+            if (now > held) {
+                quiet = 0
+                held = now
+                // Said, because otherwise this is a minute of a screen that claims to be starting
+                // and visibly is not.
+                onArrival(held)
+            } else {
+                quiet++
+                // The other device answered and brought nothing of ours, so nothing is coming.
+                // An event rather than a count of seconds: the two devices are not equally fast,
+                // and a constant that suits one is wrong on the other.
+                if (held == before && PeerPresence.conversationsHad() > conversationsBefore) break
+            }
+            // Something has arrived, so more is probably coming, and the gaps between one round and
+            // the next are seconds: measured once at two seconds of patience, a phone set off after
+            // half its library had arrived and computed 2308 vectors that were on their way to it.
+            if (held > before && quiet >= PATIENT_ROUNDS) break
+        }
+        return held > before
+    }
+
     actual suspend fun scanSongs(
         songs: List<Song>,
         onProgress: (Float, String, Int, Long) -> Unit
@@ -124,7 +216,28 @@ actual class AiScanner actual constructor() {
                 refusals = dao.refusals(),
                 stampOf = ::stampOf
             ).toHashSet()
-            val songsToProcess = songs.filter { it.path in pending }
+            var songsToProcess = songs.filter { it.path in pending }
+
+            // Asking is a hundred times cheaper than answering. A print costs a fifth of a
+            // millisecond — a seek and a quarter of a megabyte — and lets the other device
+            // recognise the track by its sound; analysing the same track costs seconds of decoding
+            // and inference. So the backlog is named first, and whatever the other device is still
+            // handing over is given a moment to arrive before any of it is computed here.
+            takePrints(songsToProcess)
+            if (letVectorsArrive(songsToProcess.size) { held ->
+                    onProgress(
+                        held.toFloat() / songs.size.coerceAtLeast(1),
+                        "Taking what the other device already has...",
+                        held,
+                        -1L
+                    )
+                }
+            ) {
+                val arrived = dao.getAllEmbeddings().mapTo(HashSet()) { it.path }
+                songsToProcess = songsToProcess.filter { it.path !in arrived }
+                println("AiScanner: after asking the other device, ${songsToProcess.size} are left")
+            }
+
             val alreadyScannedCount = songs.size - songsToProcess.size
             val totalToProcess = songsToProcess.size
 
@@ -154,6 +267,10 @@ actual class AiScanner actual constructor() {
                                 )
 
                                 if (!File(song.path).exists()) return@withTimeoutOrNull
+                                // It may have arrived since the list was made: a pass runs while
+                                // this walks the library, and a vector in hand is worth more than
+                                // the one this would compute.
+                                if (dao.hasEmbedding(song.path)) return@withTimeoutOrNull
 
                                 val audioData = decodeExcerpt(song.path, song.duration)
 
@@ -278,6 +395,25 @@ actual class AiScanner actual constructor() {
     }
 
     private companion object {
+
+        /**
+         * How long one quiet moment is: how often the wait looks up to see what has changed.
+         *
+         * A second, which is short against anything it is waiting for and cheap to ask. There is
+         * deliberately no constant for *how long to wait*: that is decided by what happens, not by
+         * a number. See [letVectorsArrive].
+         */
+        private const val ARRIVAL_PAUSE_MS = 1_000L
+
+        /**
+         * Something has arrived, so wait for the stream to really stop. Ten seconds of quiet,
+         * because the gap between one conversation and the next is a few seconds.
+         */
+        private const val PATIENT_ROUNDS = 10
+
+        /** However patient, not for ever: five minutes is longer than a library takes to arrive. */
+        private const val MOST_ROUNDS = 300
+
         const val EMBEDDING_SIZE = 512
         const val CHUNK_MS = Excerpt.LENGTH_MS
         const val FRAMES = 1001L

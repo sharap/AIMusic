@@ -19,7 +19,29 @@ interface MusicDao {
     suspend fun refusals(): Map<String, String>
 
     /**
-     * What each file's sound hashes to, and the stamp it was hashed under: path to stamp and print.
+     * What this device knows about one file from its bytes, under the stamp it was learnt at.
+     *
+     * Either half may be missing. A file hashed by an older build has no excerpt start; a file
+     * whose excerpt was named on the way into a conversation may have no print, because naming an
+     * excerpt is asked of every track a peer mentions while hashing is asked only of the ones
+     * about to be analysed.
+     */
+    data class FilePrint(
+        /** "length:modifiedAt" when this was learnt; a different one means a different file. */
+        val stamp: String,
+        /** sha256 of the sound, lowercase hex, or null if this file has not been hashed. */
+        val print: String? = null,
+        /**
+         * Which millisecond the analysed excerpt starts at, or null if nobody has worked it out.
+         *
+         * Null and not zero, because zero is a real answer: a recording shorter than the excerpt
+         * is analysed from its very beginning.
+         */
+        val excerptStartMs: Long? = null
+    )
+
+    /**
+     * What each file's sound hashes to and where its excerpt starts, by path.
      *
      * Kept apart from the vectors because the tracks it is most needed for are the ones with no
      * vector yet — a device names what it is missing to its peer, and naming it by sound rather
@@ -27,10 +49,47 @@ interface MusicDao {
      * change, which throws every vector away. The sound of a file does not depend on which model
      * read it. See `SoundPrint`.
      */
-    suspend fun soundPrints(): Map<String, Pair<String, String>>
+    suspend fun soundPrints(): Map<String, FilePrint>
+
+    /**
+     * What is known about one file, without copying the whole table.
+     *
+     * One lookup rather than a map of four and a half thousand, because this is asked per track:
+     * a conversation needs the excerpt start of every track it mentions, in either direction.
+     */
+    suspend fun soundPrint(path: String): FilePrint?
 
     /** Stores prints, replacing whatever was held for those paths. */
-    suspend fun rememberSoundPrints(prints: Map<String, Pair<String, String>>)
+    suspend fun rememberSoundPrints(prints: Map<String, FilePrint>)
+
+    /**
+     * Holds one row and writes the file only once it is worth rewriting.
+     *
+     * The table is a file rewritten whole, so a row per write would be four thousand rewrites
+     * during one conversation — the very cost this exists to remove. A row that never reaches the
+     * file is worked out again next time, which is where the whole library was before.
+     */
+    suspend fun rememberSoundPrint(path: String, held: FilePrint)
+
+    /**
+     * How many tracks the analysis has already dealt with — vectors and refusals alike — or null
+     * while the table has not been read yet.
+     *
+     * Without suspending, unlike everything else here, because of where it is asked from: the
+     * beacon announces what this device is missing from a socket thread every few seconds, and a
+     * question that could block there would be the wrong question in the wrong place. Null rather
+     * than zero for "not known yet", since zero is what an empty table truthfully has.
+     */
+    fun dealtWithNow(): Int?
+
+    /**
+     * Whether this track has a vector right now.
+     *
+     * One lookup rather than a copy of every row, because the scan asks it per track: a vector
+     * that arrived from the other device while the scan was walking the library saves a decode and
+     * an inference.
+     */
+    suspend fun hasEmbedding(path: String): Boolean
 
     suspend fun insertEmbedding(embedding: EmbeddingEntity)
 

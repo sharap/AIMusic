@@ -1,5 +1,6 @@
 package music.ai.recommend.sync
 
+import music.ai.recommend.ai.AnalysisBacklog
 import music.ai.recommend.ai.Excerpt
 import music.ai.recommend.ai.SharedDecoder
 import music.ai.recommend.db.ANALYSIS_VERSION
@@ -12,9 +13,9 @@ import music.ai.recommend.model.Song
  * This app's embeddings, as [SyncCoordinator] wants to see them.
  *
  * All of what is particular to this port lives here: the vectors are a packed file keyed by path,
- * and a duration comes from the tag reader — which is the same reading the analysis uses, so unlike
- * on the phone no file has to be opened to name an excerpt. That is the whole asymmetry between the
- * two implementations, and it is why the question is asked of the platform at all.
+ * the excerpt start is remembered beside the sound print, and a duration comes from the tag reader.
+ * That is the whole asymmetry between the two implementations, and it is why the question is asked
+ * of the platform at all.
  *
  * Not a copy. The Android app's answer to the same question is `EmbeddingVectorStore`, over a Room
  * table keyed by MediaStore id and a container duration read through MediaExtractor.
@@ -47,13 +48,54 @@ class DaoVectorStore(
     override suspend fun decoderFor(track: String): String =
         SharedDecoder.of(track) ?: PLATFORM
 
+    /**
+     * Which millisecond the analysed excerpt starts at, worked out once per file and then
+     * remembered beside its print.
+     *
+     * Asked once per track per conversation, by both devices and in both directions: the one
+     * handing a vector over names the window it describes, the one taking a vector in names its
+     * own window to judge whether they agree. The number that arrives in a record is no help to
+     * the receiver, since comparing the other device's answer with itself is no comparison.
+     *
+     * Working it out walks the file, and asked afresh every time that is the entire cost of an
+     * exchange: one measured conversation of 4223 vectors spent six minutes in here, saying
+     * nothing, while the phone at the other end gave up waiting after two seconds and set about
+     * computing what was already on its way.
+     */
     override suspend fun excerptStartMs(track: String): Long? {
+        val file = java.io.File(track)
+        if (!file.isFile) {
+            // No file to stamp, so nothing worth remembering — but the answer is not therefore
+            // unknown. Here, unlike on the phone, a duration comes from the library and not from
+            // the file, so a track on an unplugged drive still has a window that can be named,
+            // and for a format with no shared decoder that duration is the only answer there is.
+            return durationOf(track)?.let { Excerpt.startMs(it) }
+        }
+        val stamp = AnalysisBacklog.stamp(file.length(), file.lastModified())
+        val held = dao.soundPrint(track)
+        if (held != null && held.stamp == stamp) held.excerptStartMs?.let { return it }
+        val start = excerptStartFromFile(file) ?: return null
+        dao.rememberSoundPrint(
+            track,
+            MusicDao.FilePrint(
+                stamp = stamp,
+                // Carried over rather than dropped: a row holds everything known about its file,
+                // and writing one that forgot the print would mean hashing it again.
+                print = held?.takeIf { it.stamp == stamp }?.print,
+                excerptStartMs = start
+            )
+        )
+        return start
+    }
+
+    /** The walk itself, which is what the remembering exists to do once. */
+    private suspend fun excerptStartFromFile(file: java.io.File): Long? {
         // For a format the shared decoder handles, the decoder's own count of the samples — which
         // is what it chose the window by. The tag reader's whole seconds are a different number,
         // and naming the window with them is how a correct vector comes to be refused: measured
         // against one phone, about a quarter of a library came out one two-second bucket apart.
-        SharedDecoder.startMs(java.io.File(track))?.let { return it }
-        val duration = durationOf(track) ?: return null
+        SharedDecoder.startMs(file)?.let { return it }
+        val duration = durationOf(file.path) ?: return null
         return Excerpt.startMs(duration)
     }
 

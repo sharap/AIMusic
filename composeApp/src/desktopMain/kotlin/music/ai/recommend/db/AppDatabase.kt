@@ -235,23 +235,37 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     private val printLock = Any()
 
     @Volatile
-    private var printCache: MutableMap<String, Pair<String, String>>? = null
+    private var printCache: MutableMap<String, MusicDao.FilePrint>? = null
 
-    private fun printsLoaded(): MutableMap<String, Pair<String, String>> {
+    /** Rows held by [rememberSoundPrint] and not yet written; see that method. */
+    private val unwrittenPrints = LinkedHashMap<String, MusicDao.FilePrint>()
+
+    private fun printsLoaded(): MutableMap<String, MusicDao.FilePrint> {
         printCache?.let { return it }
         return synchronized(printLock) {
             printCache ?: run {
-                val loaded = LinkedHashMap<String, Pair<String, String>>()
+                val loaded = LinkedHashMap<String, MusicDao.FilePrint>()
                 if (printsFile.exists()) {
                     try {
                         DataInputStream(printsFile.inputStream().buffered()).use { input ->
-                            if (input.readInt() == PRINTS_MAGIC && input.readInt() == PRINTS_FORMAT) {
+                            val magic = input.readInt()
+                            val format = input.readInt()
+                            // Format 1 is read as well as written, because the prints in it cost a
+                            // pass over every file in the library and are still true: the stamp
+                            // they were taken under has not changed meaning. They simply have no
+                            // excerpt start, which is what null says.
+                            if (magic == PRINTS_MAGIC && (format == 1 || format == PRINTS_FORMAT)) {
                                 val count = input.readInt()
                                 repeat(count) {
                                     val path = input.readUTF()
                                     val stamp = input.readUTF()
                                     val print = input.readUTF()
-                                    loaded[path] = stamp to print
+                                    val start = if (format == 1) UNKNOWN_START else input.readLong()
+                                    loaded[path] = MusicDao.FilePrint(
+                                        stamp = stamp,
+                                        print = print.takeIf { it.isNotEmpty() },
+                                        excerptStartMs = start.takeIf { it != UNKNOWN_START }
+                                    )
                                 }
                             }
                         }
@@ -264,16 +278,36 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         }
     }
 
-    override suspend fun soundPrints(): Map<String, Pair<String, String>> =
+    override suspend fun soundPrints(): Map<String, MusicDao.FilePrint> =
         synchronized(printLock) { LinkedHashMap(printsLoaded()) }
 
-    override suspend fun rememberSoundPrints(prints: Map<String, Pair<String, String>>) {
+    override suspend fun soundPrint(path: String): MusicDao.FilePrint? =
+        synchronized(printLock) { printsLoaded()[path] }
+
+    override suspend fun rememberSoundPrint(path: String, held: MusicDao.FilePrint) {
+        val due = synchronized(printLock) {
+            printsLoaded()[path] = held
+            unwrittenPrints[path] = held
+            if (unwrittenPrints.size < PRINTS_WRITE_AT) null
+            else LinkedHashMap(unwrittenPrints).also { unwrittenPrints.clear() }
+        } ?: return
+        writePrints(due.size)
+    }
+
+    override suspend fun rememberSoundPrints(prints: Map<String, MusicDao.FilePrint>) {
         if (prints.isEmpty()) return
-        val rows = synchronized(printLock) {
-            val held = printsLoaded()
-            held.putAll(prints)
-            held.entries.toList()
+        synchronized(printLock) {
+            printsLoaded().putAll(prints)
+            // These rows are now the written truth, so the buffer must not undo them later with
+            // an older idea of the same files.
+            unwrittenPrints.keys.removeAll(prints.keys)
         }
+        writePrints(prints.size)
+    }
+
+    /** Writes the whole table, which is how a file of this size is kept consistent. */
+    private fun writePrints(changed: Int) {
+        val rows = synchronized(printLock) { printsLoaded().entries.map { it.key to it.value } }
         try {
             if (!baseDir.exists()) baseDir.mkdirs()
             val tmp = File(printsFile.path + ".tmp")
@@ -283,8 +317,9 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                 out.writeInt(rows.size)
                 for ((path, held) in rows) {
                     out.writeUTF(path)
-                    out.writeUTF(held.first)
-                    out.writeUTF(held.second)
+                    out.writeUTF(held.stamp)
+                    out.writeUTF(held.print ?: "")
+                    out.writeLong(held.excerptStartMs ?: UNKNOWN_START)
                 }
             }
             if (!tmp.renameTo(printsFile)) {
@@ -292,8 +327,14 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                 tmp.renameTo(printsFile)
             }
         } catch (e: Exception) {
-            println("DesktopMusicDao: could not store ${prints.size} prints: ${e.message}")
+            println("DesktopMusicDao: could not store $changed prints: ${e.message}")
         }
+    }
+
+    override fun dealtWithNow(): Int? = synchronized(lock) { cache.size }
+
+    override suspend fun hasEmbedding(path: String): Boolean = synchronized(lock) {
+        cache[path]?.vector?.isNotEmpty() == true
     }
 
     override suspend fun insertEmbedding(embedding: EmbeddingEntity) {
@@ -623,7 +664,17 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         /** `AIMP`, for the file of sound prints. */
         const val PRINTS_MAGIC = 0x41494D50
 
-        const val PRINTS_FORMAT = 1
+        /**
+         * Format 2 added the excerpt start to each row. Format 1, which had only the stamp and
+         * the print, is still read: see [printsLoaded].
+         */
+        const val PRINTS_FORMAT = 2
+
+        /** Written where a row has no excerpt start, since zero is a real one. */
+        const val UNKNOWN_START = Long.MIN_VALUE
+
+        /** How many held rows are worth rewriting the file; see [MusicDao.rememberSoundPrint]. */
+        const val PRINTS_WRITE_AT = 64
 
         /**
          * How the table is laid out, as opposed to what the vectors in it mean.
