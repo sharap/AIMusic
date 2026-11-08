@@ -12,7 +12,20 @@ import java.util.logging.Logger
 actual class MusicScanner actual constructor() {
     
     init {
+        // The tag reader says a line per file about padding it found and tags that end where the
+        // audio does not start — four and a half thousand lines a scan. Setting the level was not
+        // enough: it creates loggers of its own as it goes and gives them their own levels, so
+        // what actually silences it is refusing its records at the handlers everything shares.
+        // Worth the twelve lines now that this app keeps a log beside its data, where that noise
+        // would bury the three lines a sync pass has to say.
         Logger.getLogger("org.jaudiotagger").level = Level.OFF
+        for (handler in Logger.getLogger("").handlers) {
+            val before = handler.filter
+            handler.filter = java.util.logging.Filter { record ->
+                if (record.loggerName.orEmpty().startsWith("org.jaudiotagger")) false
+                else before?.isLoggable(record) ?: true
+            }
+        }
     }
 
     actual fun scanMusic(): List<Folder> {

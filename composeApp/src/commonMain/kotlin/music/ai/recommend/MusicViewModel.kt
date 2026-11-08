@@ -691,7 +691,14 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 // The earliest moment anything from the other device can be placed: before the
                 // scan there is nothing to match a listen against. A machine coming back after
                 // being away catches up here, without being asked.
-                syncPass(force = true, takeIn = true)
+                //
+                // Started beside this scan rather than inside it, and never awaited. The opening
+                // sequence waits for the scan before it reads the analysis and the models, and a
+                // pass can now carry a whole library: measured at five megabytes and a minute and
+                // a half, for all of which the window showed no embeddings and no models at all.
+                // `viewModelScope` and not a bare `launch`, because a child of this coroutine
+                // would be waited for by the same join that was the problem.
+                viewModelScope.launch { syncPass(force = true, takeIn = true) }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {
                     println("MusicViewModel: Scan cancelled.")
@@ -1473,7 +1480,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
      * from inside somebody else's phone call is not a thing to do. Until this machine has one of
      * its own, the honest answer to a peer is that there is nothing here.
      */
-    private val vectorCourier = VectorCourier { syncCoordinator }
+    private val vectorCourier = VectorCourier({ syncCoordinator }, { line -> println("Sync: $line") })
 
     /** The listener, the beacon and one exchange per pass; null until this machine has an id. */
     private val peerTransport: PeerTransport? by lazy {
@@ -1640,7 +1647,19 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             foreground.collectLatest { inFront ->
                 while (inFront) {
                     delay(FOREGROUND_POLL_MS)
-                    drainPasses()
+                    // Guarded, because the loop is the only thing that makes sync happen at all.
+                        // An exception thrown anywhere in a pass used to end it for the rest of the run:
+                        // the app went on playing music, the port went on listening, and nothing was ever
+                        // carried again until somebody restarted it — which is exactly what was being
+                        // restarted, several times, before this was understood. A failure is worth one
+                        // tick, not the loop.
+                    try {
+                        drainPasses()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        println("Sync: a pass while the window is open failed: ${e.message}")
+                    }
                 }
             }
         }
@@ -1814,6 +1833,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             if ((tookVectors?.takenIn ?: 0) > 0) {
                 loadScannedIds()
             }
+            // A vector that arrived may be the answer for another copy of the same sound, and
+            // this is the only moment that can be known: the pass that takes vectors in is not the
+            // pass that read the library. Without it the copies waited for a restart — measured
+            // here, a machine restored 4351 of 4548 and stopped, and the 197 left were almost
+            // exactly its own duplicate copies.
+            if (fillTwinVectors() > 0) loadScannedIds()
             // True when a reader stopped short of the end: it takes in only so much at a time
             // and says so. Whoever drives the passes can then come straight back instead of
             // waiting for the next arrival — see [drainPasses].
@@ -1956,10 +1981,22 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             while (isActive) {
                 delay(PEER_POLL_MS)
                 if (!_syncDirect.value) continue
-                // A full pass when something arrived — reading the folder for nothing is the
-                // expensive half — or when the last pass said it had stopped short, since then
-                // what is left to read is already here and nothing else will come to fetch it.
-                if (peerExchange() || _syncSummary.value.vectorsWaiting) drainPasses()
+                // Guarded, because the loop is the only thing that makes sync happen at all.
+                // An exception thrown anywhere in a pass used to end it for the rest of the run:
+                // the app went on playing music, the port went on listening, and nothing was ever
+                // carried again until somebody restarted it — which is exactly what was being
+                // restarted, several times, before this was understood. A failure is worth one
+                // tick, not the loop.
+                try {
+                    // A full pass when something arrived — reading the folder for nothing is the
+                    // expensive half — or when the last pass said it had stopped short, since then
+                    // what is left to read is already here and nothing else will come to fetch it.
+                    if (peerExchange() || _syncSummary.value.vectorsWaiting) drainPasses()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    println("Sync: the pass between passes failed: ${e.message}")
+                }
             }
         }
     }
