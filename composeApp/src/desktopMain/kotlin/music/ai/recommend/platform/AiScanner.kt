@@ -11,6 +11,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import music.ai.recommend.ai.AnalysisBacklog
 import music.ai.recommend.ai.AudioProcessor
 import music.ai.recommend.ai.DesktopAudioDecoder
 import music.ai.recommend.ai.Excerpt
@@ -106,20 +107,24 @@ actual class AiScanner actual constructor() {
 
         try {
             val dao = db.musicDao()
-            val allEmbeddings = dao.getAllEmbeddings()
 
-            // 1. Cleanup
-            onProgress(0f, "Cleaning up database...", 0, -1L)
-            val pathsToRemove = allEmbeddings.filter { !File(it.path).exists() }.map { it.path }
-            if (pathsToRemove.isNotEmpty()) {
-                pathsToRemove.forEach { (dao as? DesktopMusicDao)?.deleteEmbeddingNoSave(it) }
-                (dao as? DesktopMusicDao)?.forceSave()
-            }
-
-            // 2. Identify remaining
-            val currentEmbeddings = dao.getAllEmbeddings()
-            val scannedPathsInDb = currentEmbeddings.map { it.path }.toSet()
-            val songsToProcess = songs.filter { it.path !in scannedPathsInDb }
+            // A vector whose file is gone is no longer thrown away here, and that is deliberate.
+            // The listening history outlives the files: a track deleted a year ago is still in the
+            // profile and still in the daily playlist, and its vector is the only record of what it
+            // sounded like. Dropping it quietly on the next scan would leave history nothing could
+            // place. The owner clears them from the settings screen instead, and the ones the
+            // history still mentions stay even then.
+            val scannedPathsInDb = dao.getAllEmbeddings().mapTo(HashSet()) { it.path }
+            // Files refused earlier are left alone unless the file itself has changed since; see
+            // AnalysisBacklog. Without it a library's broken files — a download that stopped at its
+            // ID3 tag, a playlist saved as .mp3 — would be decoded again on every scan for ever.
+            val pending = AnalysisBacklog.pending(
+                tracks = songs.map { it.path },
+                analysed = scannedPathsInDb,
+                refusals = dao.refusals(),
+                stampOf = ::stampOf
+            ).toHashSet()
+            val songsToProcess = songs.filter { it.path in pending }
             val alreadyScannedCount = songs.size - songsToProcess.size
             val totalToProcess = songsToProcess.size
 
@@ -152,15 +157,17 @@ actual class AiScanner actual constructor() {
 
                                 val audioData = decodeExcerpt(song.path, song.duration)
 
-                                // A track that would not decode is still stored, as a zero vector,
-                                // so the next scan does not keep retrying it. Cosine similarity
-                                // against it is zero, so it never surfaces as a recommendation.
-                                val embedding = if (audioData.isEmpty()) {
-                                    FloatArray(EMBEDDING_SIZE)
+                                // A track that would not decode is remembered as a refusal, so the
+                                // next scan does not keep retrying it — but as a refusal and not as
+                                // a vector of zeros, so it stays out of the similarity space, is
+                                // never offered to another device as though it had been analysed,
+                                // and is reconsidered if the file is ever replaced by a whole one.
+                                if (audioData.isEmpty()) {
+                                    dao.refuseEmbedding(song.path, stampOf(song.path))
                                 } else {
-                                    runInference(audioProcessor.extractFeatures(audioData))
+                                    val embedding = runInference(audioProcessor.extractFeatures(audioData))
+                                    dao.insertEmbedding(EmbeddingEntity(song.path, embedding.toList()))
                                 }
-                                dao.insertEmbedding(EmbeddingEntity(song.path, embedding.toList()))
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -203,6 +210,19 @@ actual class AiScanner actual constructor() {
             // Also runs when the user stops the scan, so the ~280 MB session is not left resident.
             release()
         }
+    }
+
+    /**
+     * What the file looks like now, for remembering or expiring a refusal.
+     *
+     * A length of zero — a file that has gone, or that cannot be read at all — gives an empty
+     * stamp, which [AnalysisBacklog] reads as "do not reconsider on this evidence".
+     */
+    private fun stampOf(path: String): String = try {
+        val file = File(path)
+        AnalysisBacklog.stamp(file.length(), file.lastModified())
+    } catch (e: SecurityException) {
+        ""
     }
 
     private fun runInference(features: FloatArray): FloatArray {

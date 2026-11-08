@@ -98,7 +98,22 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     // there was nowhere to offer it to. Zero is therefore the true answer for
                     // every row in such a file, and the first sync pass walks the library.
                     val publishedAt = if (formatVersion >= 2) input.readLong() else 0L
-                    loaded[path] = EmbeddingEntity(path, vector, publishedAt)
+                    // A row with no floats is a refusal and carries the stamp of the file it was
+                    // refused for; version 3 is where that became a thing a row can be.
+                    val stamp = if (formatVersion >= 3 && dimension == 0) input.readUTF() else null
+                    loaded[path] = if (stamp != null) {
+                        EmbeddingEntity(path, emptyList(), publishedAt, stamp)
+                    } else if (vector.isNotEmpty() && vector.all { it == 0f }) {
+                        // Before refusals had a record of their own, a file that would not decode
+                        // was stored as 512 zeros: it counted as analysed, it went out to the
+                        // other devices as though it were a vector, and nothing could reconsider
+                        // it even after the owner replaced the file. Recovered here as a refusal
+                        // with no stamp, which no present file can equal, so each gets exactly one
+                        // more attempt and then a stamp of its own.
+                        EmbeddingEntity(path, emptyList(), publishedAt, "")
+                    } else {
+                        EmbeddingEntity(path, vector, publishedAt)
+                    }
                 }
                 synchronized(lock) {
                     cache.clear()
@@ -186,6 +201,9 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
                     out.writeInt(row.vector.size)
                     for (x in row.vector) out.writeFloat(x)
                     out.writeLong(row.publishedAt)
+                    // Only a refusal has no floats, and only a refusal has a stamp, so the size
+                    // just written says whether one follows.
+                    if (row.vector.isEmpty()) out.writeUTF(row.refusedStamp.orEmpty())
                 }
             }
             if (!tmp.renameTo(embeddingsFile)) {
@@ -198,12 +216,23 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
     }
 
     override suspend fun getAllEmbeddings(): List<EmbeddingEntity> {
-        return synchronized(lock) { cache.values.toList() }
+        return synchronized(lock) { cache.values.filter { it.refusedStamp == null } }
+    }
+
+    override suspend fun refusals(): Map<String, String> = synchronized(lock) {
+        cache.values.mapNotNull { row -> row.refusedStamp?.let { row.path to it } }.toMap()
     }
 
     override suspend fun insertEmbedding(embedding: EmbeddingEntity) {
         synchronized(lock) {
+            // The whole row is replaced, so storing a vector also clears a refusal recorded for it.
             cache[embedding.path] = embedding
+        }
+    }
+
+    override suspend fun refuseEmbedding(path: String, stamp: String) {
+        synchronized(lock) {
+            cache[path] = EmbeddingEntity(path, emptyList(), refusedStamp = stamp)
         }
     }
 
@@ -223,7 +252,10 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         synchronized(lock) {
             // In the table's own order, which is the order they were analysed in, so a backfill
             // that keeps being interrupted keeps making progress rather than revisiting a corner.
-            cache.values.asSequence().filter { it.publishedAt == 0L }.take(limit).toList()
+            cache.values.asSequence()
+                .filter { it.publishedAt == 0L && it.refusedStamp == null }
+                .take(limit)
+                .toList()
         }
 
     override suspend fun markVectorsPublished(paths: List<String>, at: Long) {
@@ -242,6 +274,14 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
 
     override suspend fun deleteEmbedding(path: String) {
         deleteEmbeddingNoSave(path)
+        forceSave()
+    }
+
+    override suspend fun deleteEmbeddings(paths: List<String>) {
+        if (paths.isEmpty()) return
+        synchronized(lock) {
+            for (path in paths) cache.remove(path)
+        }
         forceSave()
     }
 
@@ -499,12 +539,16 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
          *
          * Version 2 added, per row, when the vector was offered to the other devices. A version 1
          * file is still read — it is nine megabytes of somebody's analysis — and is written back as
-         * version 2 the next time the table is saved.
+         * the current version the next time the table is saved.
+         *
+         * Version 3 lets a row be a refusal: no floats, and the stamp of the file the analysis
+         * could not read. A version 2 file holds those as 512 zeros, which is read back as a
+         * refusal with no stamp — see the loader.
          */
-        const val FORMAT_VERSION = 2
+        const val FORMAT_VERSION = 3
 
         /** Layouts this build can read. Writing is always the current one. */
-        val READABLE_FORMATS = setOf(1, 2)
+        val READABLE_FORMATS = setOf(1, 2, 3)
 
         /** "AIMH", which tells a numbered listening log from the shape that came before it. */
         const val HISTORY_MAGIC = 0x41494D48

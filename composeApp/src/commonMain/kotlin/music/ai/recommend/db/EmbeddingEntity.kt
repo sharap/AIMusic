@@ -16,7 +16,20 @@ data class EmbeddingEntity(
      * for ones that did, since the answer for those will not change while the analysis stays put.
      */
     @SerializedName("publishedAt")
-    val publishedAt: Long = 0L
+    val publishedAt: Long = 0L,
+    /**
+     * Set only on a row that is not a vector but a refusal: the analysis tried to read the file
+     * and could not, and this is what the file looked like at the time — see
+     * [music.ai.recommend.ai.AnalysisBacklog.stamp]. Null on every real vector, whose [vector] is
+     * the 512 floats; a refusal's is empty, because there is nothing to put there.
+     *
+     * In this table rather than one of its own because it answers the same question a vector
+     * answers — has the analysis dealt with this track? — and because it has to be thrown away
+     * with the vectors when the analysis version changes: a file the old decoders could not read
+     * is not a file the new ones cannot.
+     */
+    @SerializedName("refusedStamp")
+    val refusedStamp: String? = null
 )
 
 /**

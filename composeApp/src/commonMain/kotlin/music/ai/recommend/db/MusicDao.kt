@@ -4,9 +4,30 @@ import music.ai.recommend.model.AppSettings
 import music.ai.recommend.model.Playlist
 
 interface MusicDao {
+    /**
+     * Every stored vector. Refusals are not among them: everything that computes a similarity
+     * reads this, and a track with no direction would sit at distance 1 from the whole library —
+     * a point DBSCAN has to cluster and a candidate the wave scores 0 on every term, which beats
+     * anything the listener is moving away from. See [refusals].
+     */
     suspend fun getAllEmbeddings(): List<EmbeddingEntity>
+
+    /**
+     * Tracks the analysis tried and could not read, each with the stamp of the file it gave up on;
+     * see [music.ai.recommend.ai.AnalysisBacklog].
+     */
+    suspend fun refusals(): Map<String, String>
+
     suspend fun insertEmbedding(embedding: EmbeddingEntity)
+
+    /** Remembers that this file could not be read, so the next scan does not try it again for nothing. */
+    suspend fun refuseEmbedding(path: String, stamp: String)
+
     suspend fun deleteEmbedding(path: String)
+
+    /** Several at once, for the vectors whose track the library no longer has. */
+    suspend fun deleteEmbeddings(paths: List<String>)
+
     suspend fun clearAllEmbeddings()
 
     /**
@@ -18,7 +39,14 @@ interface MusicDao {
      */
     suspend fun insertEmbeddings(embeddings: List<EmbeddingEntity>): Int
 
-    /** Vectors not yet offered to the other devices; see [EmbeddingEntity.publishedAt]. */
+    /**
+     * Vectors not yet offered to the other devices; see [EmbeddingEntity.publishedAt].
+     *
+     * Refusals are left out, and not as an optimisation. "I could not read this file" is a verdict
+     * about one machine's decoders; the device at the other end may read the format perfectly
+     * well, and if it took the refusal for a vector it would mark the track analysed and never
+     * look at it again.
+     */
     suspend fun vectorsToPublish(limit: Int): List<EmbeddingEntity>
 
     /** Records that these have been dealt with, whether or not they could travel. */

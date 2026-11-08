@@ -29,6 +29,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
     val aiScanStatus by viewModel.aiScanStatus.collectAsState()
     val scannedSongIds by viewModel.scannedSongIds.collectAsState()
     val analysisReset by viewModel.analysisReset.collectAsState()
+    val housekeeping by viewModel.vectorHousekeeping.collectAsState()
     val modelProgress by viewModel.modelProgress.collectAsState()
     val modelsReady by viewModel.modelsReady.collectAsState()
     val modelsPendingBytes by viewModel.modelsPendingBytes.collectAsState()
@@ -242,7 +243,9 @@ fun SettingsScreen(viewModel: MusicViewModel) {
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "Analyzed songs: ${scannedSongIds.size}",
+                        // The library's own tracks, not the rows held: those outlive the library,
+                        // and a count of them reads as a library analysed past its own size.
+                        "Analyzed songs: ${if (housekeeping.analysed > 0) housekeeping.analysed else scannedSongIds.size}",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -287,6 +290,43 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                         }
                     }
                     
+                    // Files that would not read, and vectors whose track is gone. Shown only when
+                    // there are any: a library with neither should not be told about either.
+                    if (housekeeping.unreadable > 0) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "Could not be read: ${housekeeping.unreadable}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            "Usually a broken file — a download that stopped, or a playlist saved " +
+                                "as .mp3. Replace the file and the next scan will pick it up.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    if (housekeeping.orphaned > 0) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "Vectors with no track: ${housekeeping.orphaned}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (housekeeping.orphanedInHistory > 0) {
+                            Text(
+                                "${housekeeping.orphanedInHistory} of them are still in your " +
+                                    "listening history, and those are kept.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (housekeeping.removable > 0) {
+                            TextButton(onClick = { viewModel.clearOrphanedVectors() }) {
+                                Text("Remove ${housekeeping.removable}")
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { viewModel.clearAiData() }) {
                         Text("Clear AI Data", color = MaterialTheme.colorScheme.error)
