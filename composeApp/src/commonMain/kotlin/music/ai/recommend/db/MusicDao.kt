@@ -18,6 +18,20 @@ interface MusicDao {
      */
     suspend fun refusals(): Map<String, String>
 
+    /**
+     * What each file's sound hashes to, and the stamp it was hashed under: path to stamp and print.
+     *
+     * Kept apart from the vectors because the tracks it is most needed for are the ones with no
+     * vector yet — a device names what it is missing to its peer, and naming it by sound rather
+     * than by spelling is the whole point — and because it has to outlive an analysis version
+     * change, which throws every vector away. The sound of a file does not depend on which model
+     * read it. See `SoundPrint`.
+     */
+    suspend fun soundPrints(): Map<String, Pair<String, String>>
+
+    /** Stores prints, replacing whatever was held for those paths. */
+    suspend fun rememberSoundPrints(prints: Map<String, Pair<String, String>>)
+
     suspend fun insertEmbedding(embedding: EmbeddingEntity)
 
     /** Remembers that this file could not be read, so the next scan does not try it again for nothing. */

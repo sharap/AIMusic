@@ -223,6 +223,79 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         cache.values.mapNotNull { row -> row.refusedStamp?.let { row.path to it } }.toMap()
     }
 
+    /**
+     * The prints, read once and kept: a small file of its own beside the vectors.
+     *
+     * Its own file rather than a column in embeddings.bin because it outlives that file — an
+     * analysis version change discards every vector, and the sound of a file is not the model's
+     * opinion of it.
+     */
+    private val printsFile = File(baseDir, "prints.bin")
+
+    private val printLock = Any()
+
+    @Volatile
+    private var printCache: MutableMap<String, Pair<String, String>>? = null
+
+    private fun printsLoaded(): MutableMap<String, Pair<String, String>> {
+        printCache?.let { return it }
+        return synchronized(printLock) {
+            printCache ?: run {
+                val loaded = LinkedHashMap<String, Pair<String, String>>()
+                if (printsFile.exists()) {
+                    try {
+                        DataInputStream(printsFile.inputStream().buffered()).use { input ->
+                            if (input.readInt() == PRINTS_MAGIC && input.readInt() == PRINTS_FORMAT) {
+                                val count = input.readInt()
+                                repeat(count) {
+                                    val path = input.readUTF()
+                                    val stamp = input.readUTF()
+                                    val print = input.readUTF()
+                                    loaded[path] = stamp to print
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        println("DesktopMusicDao: could not read prints.bin: ${e.message}")
+                    }
+                }
+                loaded
+            }.also { printCache = it }
+        }
+    }
+
+    override suspend fun soundPrints(): Map<String, Pair<String, String>> =
+        synchronized(printLock) { LinkedHashMap(printsLoaded()) }
+
+    override suspend fun rememberSoundPrints(prints: Map<String, Pair<String, String>>) {
+        if (prints.isEmpty()) return
+        val rows = synchronized(printLock) {
+            val held = printsLoaded()
+            held.putAll(prints)
+            held.entries.toList()
+        }
+        try {
+            if (!baseDir.exists()) baseDir.mkdirs()
+            val tmp = File(printsFile.path + ".tmp")
+            DataOutputStream(tmp.outputStream().buffered(1 shl 16)).use { out ->
+                out.writeInt(PRINTS_MAGIC)
+                out.writeInt(PRINTS_FORMAT)
+                out.writeInt(rows.size)
+                for ((path, held) in rows) {
+                    out.writeUTF(path)
+                    out.writeUTF(held.first)
+                    out.writeUTF(held.second)
+                }
+            }
+            if (!tmp.renameTo(printsFile)) {
+                printsFile.delete()
+                tmp.renameTo(printsFile)
+            }
+        } catch (e: Exception) {
+            println("DesktopMusicDao: could not store ${prints.size} prints: ${e.message}")
+        }
+    }
+
     override suspend fun insertEmbedding(embedding: EmbeddingEntity) {
         synchronized(lock) {
             // The whole row is replaced, so storing a vector also clears a refusal recorded for it.
@@ -546,6 +619,11 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
 
         /** "AIME", so a file that is not this table is recognised rather than misparsed. */
         const val MAGIC = 0x41494D45
+
+        /** `AIMP`, for the file of sound prints. */
+        const val PRINTS_MAGIC = 0x41494D50
+
+        const val PRINTS_FORMAT = 1
 
         /**
          * How the table is laid out, as opposed to what the vectors in it mean.

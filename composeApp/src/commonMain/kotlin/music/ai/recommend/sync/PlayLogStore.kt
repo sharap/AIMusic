@@ -18,7 +18,16 @@ class PlayLogStore(
     private val dao: MusicDao,
     private val songs: suspend () -> List<Song>,
     /** How long this app keeps history, which is as far back as a merge looks. */
-    private val keepDays: Long = 365
+    private val keepDays: Long = 365,
+    /**
+     * The print of each file's sound, for the tracks this device has taken one of.
+     *
+     * The key carries it when it is known, and then identity stops being a judgement call about
+     * spelling: two copies of one recording agree however their tags were written, and two
+     * different recordings under one name stop being the same track. Null for a file nobody has
+     * hashed yet, which is the honest answer and the one the tags are for.
+     */
+    private val prints: suspend () -> Map<String, String> = { emptyMap() }
 ) : HistoryStore<String> {
 
     override suspend fun own(afterId: Long, limit: Int): List<OwnListen<String>> =
@@ -52,6 +61,7 @@ class PlayLogStore(
 
     override suspend fun library(): Map<String, TrackKey> {
         val library = songs()
+        val known = prints()
         val keys = LinkedHashMap<String, TrackKey>(library.size * 2)
         for (song in library) {
             // Keyed by path, which is what a listen here is recorded against. Two copies of one
@@ -62,7 +72,8 @@ class PlayLogStore(
                 artist = song.artist,
                 title = song.title,
                 fileName = song.path.substringAfterLast('/'),
-                durationMs = song.duration
+                durationMs = song.duration,
+                hash = known[song.path]
             )
         }
         return keys

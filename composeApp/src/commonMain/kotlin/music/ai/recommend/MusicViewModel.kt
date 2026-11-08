@@ -25,6 +25,7 @@ import music.ai.recommend.platform.ModelDownloader
 import music.ai.recommend.platform.ModelProgress
 import music.ai.recommend.history.PlayEvent
 import music.ai.recommend.history.PlayTracker
+import music.ai.recommend.db.EmbeddingEntity
 import music.ai.recommend.db.PlayEventEntity
 import music.ai.recommend.platform.PlaybackRemote
 import music.ai.recommend.platform.RemoteControlService
@@ -32,8 +33,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
+import music.ai.recommend.ai.AnalysisBacklog
 import music.ai.recommend.ai.SmartAlbum
 import music.ai.recommend.ai.SmartAlbumClustering
+import music.ai.recommend.ai.SoundPrint
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DirectoryPeerFiles
@@ -510,6 +513,79 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         }
     }
 
+    /**
+     * Takes the prints of files that have none, or whose file has changed since.
+     *
+     * A print is what makes a track nameable at all, and the tracks it matters most for are the
+     * ones with no vector yet — those are precisely what this machine asks its peer about. Cheap
+     * enough for the whole library: a stat and a quarter of a megabyte each, measured at 0.19 ms a
+     * file here, so four and a half thousand is about a second. Hashing whole files would have been
+     * 3 ms for an mp3 and 27 ms for a flac, and decoding each excerpt first 39 ms.
+     */
+    private suspend fun refreshSoundPrints(): Int = withContext(Dispatchers.IO) {
+        try {
+            val library = allSongs.associate { it.path to it.path }
+            if (library.isEmpty()) return@withContext 0
+            val held = db.musicDao().soundPrints()
+            val wanted = SoundPrint.missing(
+                tracks = library,
+                held = held.mapValues { (_, row) -> row.first },
+                stampOf = { path -> stampOf(path) }
+            )
+            if (wanted.isEmpty()) return@withContext 0
+            val taken = LinkedHashMap<String, Pair<String, String>>()
+            for (path in wanted) {
+                val stamp = stampOf(path)
+                if (stamp.isEmpty()) continue
+                val print = SoundPrint.of(java.io.File(path)) ?: continue
+                taken[path] = stamp to print
+            }
+            if (taken.isNotEmpty()) {
+                db.musicDao().rememberSoundPrints(taken)
+                println("Sync: took ${taken.size} sound prints")
+            }
+            // Always, and not only when prints were taken: the copies may have been waiting since
+            // before this machine knew what their sound was.
+            if (fillTwinVectors() > 0) loadScannedIds()
+            taken.size
+        } catch (e: Exception) {
+            e.printStackTrace()
+            0
+        }
+    }
+
+    /**
+     * Gives a track the vector of another copy of the same sound.
+     *
+     * No model and no network: the same sound has the same vector, which is what a print means.
+     * One library holds the same recording twice more often than one would think — 186 sounds of
+     * 4371 on the phone this was measured against — and every copy used to be analysed again from
+     * scratch. A copy could not even be filled by sync: a peer served the vector, the device
+     * recognised the sound as one it already had and dropped it as nothing new.
+     */
+    private suspend fun fillTwinVectors(): Int {
+        val prints = db.musicDao().soundPrints().mapValues { (_, held) -> held.second }
+        if (prints.isEmpty()) return 0
+        val rows = db.musicDao().getAllEmbeddings()
+        val held = rows.filter { it.vector.isNotEmpty() }.associateBy { it.path }
+        val twins = SoundPrint.twins(prints, held.keys)
+        if (twins.isEmpty()) return 0
+        val copies = twins.mapNotNull { (empty, holder) ->
+            held[holder]?.let { EmbeddingEntity(path = empty, vector = it.vector) }
+        }
+        if (copies.isEmpty()) return 0
+        val stored = db.musicDao().insertEmbeddings(copies)
+        if (stored > 0) println("Sync: filled $stored vectors from another copy of the same sound")
+        return stored
+    }
+
+    /** What the file looks like now, which is the only reason a print is ever taken again. */
+    private fun stampOf(path: String): String {
+        val file = java.io.File(path)
+        if (!file.isFile) return ""
+        return AnalysisBacklog.stamp(file.length(), file.lastModified())
+    }
+
     private fun loadScannedIds() {
         viewModelScope.launch {
             try {
@@ -607,6 +683,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                     _playlists.value = db.musicDao().loadPlaylists(allSongs)
                     println("MusicViewModel: Scan complete. Found ${scannedFolders.size} folders, ${allSongs.size} total songs.")
                 }
+
+                // Before the first pass, so that what this machine asks for is named by its
+                // sound and not only by its spelling.
+                refreshSoundPrints()
 
                 // The earliest moment anything from the other device can be placed: before the
                 // scan there is nothing to match a listen against. A machine coming back after
@@ -1484,7 +1564,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         return SyncCoordinator(
             deviceId = deviceId,
             state = state,
-            store = PlayLogStore(db.musicDao(), { allSongs }, HISTORY_KEEP_DAYS),
+            store = PlayLogStore(
+                dao = db.musicDao(),
+                songs = { allSongs },
+                keepDays = HISTORY_KEEP_DAYS,
+                prints = { db.musicDao().soundPrints().mapValues { (_, held) -> held.second } }
+            ),
             folder = { syncFolder() },
             keepDays = HISTORY_KEEP_DAYS.toInt(),
             note = { println("Sync: $it") },
