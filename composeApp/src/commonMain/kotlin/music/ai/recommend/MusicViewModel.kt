@@ -1402,6 +1402,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 deviceId = id,
                 files = { peerFiles() },
                 records = { vectorCourier },
+                // No LocalNetwork here: a VPN on a desktop leaves the routes of its own subnet
+                // alone, so a socket to the phone next door goes out of the right interface
+                // without being told. A phone's VPN takes the whole table; see LocalNetwork.
                 note = { line -> println("Peer: $line") }
             )
         }
@@ -1584,7 +1587,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val coordinator = coordinator() ?: return@withContext false
         syncGate.withLock {
             // Before the readers: bring in whatever the other device has written since.
-            if (takeIn) peerExchange()
+            // Kept, because an exchange that brought vectors in is the clearest sign there are
+            // more behind them. Vectors no longer arrive inside a batch, so the reader's own "more
+            // waiting" says nothing about them, and without this the next conversation waited for
+            // the timer between passes — a library came over in batches with half-minute silences
+            // in between, and whoever was watching restarted the app to hurry it along.
+            var broughtIn = if (takeIn) peerExchange() else false
             val now = nowMs()
             val sent = runCatching { coordinator.push(now, force).written }
                 .getOrElse { println("Sync: could not write the history out: $it"); 0 }
@@ -1693,7 +1701,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
             // After the writers: hand over what this pass produced, rather than leaving it here
             // until the next one. Nothing to do when the folder transport is in use.
-            peerExchange()
+            broughtIn = peerExchange() || broughtIn
 
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
@@ -1727,7 +1735,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             //
             // It has to have got through something as well. A pass that reports more and sees
             // nothing must not become a loop.
-            tookVectors?.let { it.more && it.takenIn + it.alreadyHeld + it.unmatched > 0 } == true
+            tookVectors?.let { it.more && it.takenIn + it.alreadyHeld + it.unmatched > 0 } == true ||
+                broughtIn
         }
     }
 
@@ -1788,7 +1797,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             .getOrDefault(emptyList())
         noticeVectorsTraded(outcomes)
         refreshTransportSummary()
-        outcomes.any { it.moved }
+        // True when this exchange *brought something in*, which is the thing worth coming straight
+        // back for. Not "moved something": what this device handed over is no reason to look again,
+        // and counting it would have two devices politely passing their own output back and forth.
+        outcomes.any { it.bytesTaken > 0L || it.vectorsTaken > 0 }
     }
 
     /**
