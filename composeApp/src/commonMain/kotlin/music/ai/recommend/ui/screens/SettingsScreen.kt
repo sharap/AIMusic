@@ -15,6 +15,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
+import music.ai.recommend.platform.PhraseKept
 import music.ai.recommend.MusicViewModel
 import music.ai.recommend.platform.pickDirectory
 import music.ai.recommend.platform.pickImageFile
@@ -595,6 +596,31 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                                     "year of listening.",
                             style = MaterialTheme.typography.bodySmall
                         )
+                        // Where the one secret of this arrangement is kept. Said plainly, because
+                        // the promise is otherwise unverifiable from the outside, and because the
+                        // last of the three is one the owner may want to do something about.
+                        if (syncSummary.sealed) {
+                            Text(
+                                when (syncSummary.phraseKept) {
+                                    PhraseKept.KEYRING ->
+                                        "The phrase is in this desktop's keyring, where the rest " +
+                                            "of the desktop keeps its passwords."
+                                    PhraseKept.FILE ->
+                                        "There is no keyring here, so the phrase is in a file " +
+                                            "only you can read."
+                                    PhraseKept.PLAIN ->
+                                        "The phrase is in the settings file, which anyone on this " +
+                                            "machine can read: neither the keyring nor a file of " +
+                                            "its own would take it."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (syncSummary.phraseKept == PhraseKept.PLAIN) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
                         if (syncSummary.unopened > 0) {
                             Text(
                                 "${syncSummary.unopened} batches would not open. The phrase here " +

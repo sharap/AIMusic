@@ -16,6 +16,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import music.ai.recommend.model.*
 import music.ai.recommend.platform.MusicScanner
+import music.ai.recommend.platform.PhraseVault
+import music.ai.recommend.platform.PhraseKept
 import music.ai.recommend.platform.MusicPlayer
 import music.ai.recommend.platform.AiScanner
 import music.ai.recommend.platform.ClapTextEncoder
@@ -278,6 +280,8 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val mixTakenIn: Int = 0,
         /** Whether what this machine writes into the folder is sealed; see [GcmSealing]. */
         val sealed: Boolean = false,
+        /** Where the phrase that seals it is kept; see [PhraseVault]. */
+        val phraseKept: PhraseKept = PhraseKept.PLAIN,
         /**
          * Sealed batches met in the folder that would not open.
          *
@@ -352,10 +356,23 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val phrase = text.trim()
         _syncPhrase.value = phrase
         sealingInUse = null
+        viewModelScope.launch(Dispatchers.IO) {
+            phrases.keep(phrase)
+            _syncSummary.value = _syncSummary.value.copy(
+                sealed = phrase.isNotEmpty(),
+                phraseKept = phrases.where
+            )
+        }
         _syncSummary.value = _syncSummary.value.copy(sealed = phrase.isNotEmpty())
         saveSettings()
         viewModelScope.launch { syncPass(force = true, takeIn = true) }
     }
+
+    /**
+     * Where the phrase is kept: the desktop's own secret service, or a file only the owner can
+     * read. See [PhraseVault]; the summary says which of the two it turned out to be.
+     */
+    private val phrases by lazy { PhraseVault(java.io.File(db.dataDirectory())) }
 
     /** Sync's own files — the device id and what it remembers between runs — beside the database. */
     private val syncDirectory by lazy { java.io.File(db.dataDirectory(), "sync") }
@@ -451,7 +468,18 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _backgroundAlpha.value = s.backgroundAlpha
             _volumePercent.value = s.volumePercent.coerceIn(0, 100)
             _syncFolderPath.value = s.syncFolderPath
-            _syncPhrase.value = s.syncPhrase
+            // The vault first, and the settings only as what a machine updating into this build
+            // has left there. Moving it in happens once, and the settings keep it until the vault
+            // has read it back.
+            val kept = phrases.phrase()
+            _syncPhrase.value = kept ?: s.syncPhrase
+            if (kept == null && s.syncPhrase.isNotEmpty()) {
+                phrases.keep(s.syncPhrase)
+                println("Sync: the phrase now lives where this desktop keeps secrets: ${phrases.where}")
+                // Rewrites the settings without it, which is the moment the plain copy goes. Only
+                // ever after the vault has read the phrase back; see PhraseVault.keep.
+                if (phrases.where != PhraseKept.PLAIN) saveSettings()
+            }
             _syncDirect.value = s.syncDirect
             _syncPeerAddress.value = s.syncPeerAddress
             // Whatever was built while these were at their defaults is not about this machine's
@@ -459,7 +487,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             syncCoordinator = null
             // Nothing happens here unless the owner asked for it; see startPeerListener.
             startPeerListener()
-            _syncSummary.value = _syncSummary.value.copy(sealed = s.syncPhrase.isNotEmpty())
+            _syncSummary.value = _syncSummary.value.copy(
+                sealed = _syncPhrase.value.isNotEmpty(),
+                phraseKept = phrases.where
+            )
             player.volumePercent = _volumePercent.value
             _smartAlbumsEpsScale.value = s.smartAlbumsEpsScale.coerceIn(
                 SmartAlbumClustering.MIN_EPS_SCALE, SmartAlbumClustering.MAX_EPS_SCALE
@@ -493,7 +524,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 smartAlbumsEpsScale = _smartAlbumsEpsScale.value,
                 volumePercent = _volumePercent.value,
                 syncFolderPath = _syncFolderPath.value,
-                syncPhrase = _syncPhrase.value,
+                // Written only when nothing better would take it. Once the keyring or a file of
+                // its own holds the phrase, this field is left empty — and clearing it here is
+                // what actually removes the plain copy a machine had before this build.
+                syncPhrase = if (phrases.where == PhraseKept.PLAIN) _syncPhrase.value else "",
                 syncDirect = _syncDirect.value,
                 syncPeerAddress = _syncPeerAddress.value
             )
