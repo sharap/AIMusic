@@ -39,9 +39,9 @@ class PhraseVaultTest {
     private class Working : Keyring {
         var held: String? = null
         var reads = 0
-        override fun read(): String? {
+        override fun read(): Keyring.Kept {
             reads++
-            return held
+            return held?.let { Keyring.Kept.Phrase(it) } ?: Keyring.Kept.None
         }
         override fun write(phrase: String): Boolean {
             held = phrase
@@ -54,15 +54,29 @@ class PhraseVaultTest {
 
     /** No keyring at all: a server, a minimal desktop, Windows, macOS. */
     private class Absent : Keyring {
-        override fun read(): String? = null
+        override fun read(): Keyring.Kept = Keyring.Kept.None
         override fun write(phrase: String) = false
+        override fun forget() = Unit
+    }
+
+    /**
+     * Holds a phrase and will not show it: a keyring the owner left locked, and a prompt they
+     * closed. The one answer that must not be read as "no phrase".
+     */
+    private class Locked : Keyring {
+        var writes = 0
+        override fun read(): Keyring.Kept = Keyring.Kept.Locked
+        override fun write(phrase: String): Boolean {
+            writes++
+            return false
+        }
         override fun forget() = Unit
     }
 
     /** Takes the secret and will not give it back, which is the dangerous one. */
     private class Forgetful : Keyring {
         var writes = 0
-        override fun read(): String? = null
+        override fun read(): Keyring.Kept = Keyring.Kept.None
         override fun write(phrase: String): Boolean {
             writes++
             return true
@@ -143,5 +157,41 @@ class PhraseVaultTest {
         // otherwise be a round trip over the session bus.
         assertEquals("в связке", vault.phrase())
         assertEquals(1, keyring.reads)
+    }
+
+    @Test
+    fun aLockedKeyringIsNotTheSameAsNoPhrase() {
+        val keyring = Locked()
+        // A file left over from an older build, and settings that may still hold a copy. Neither
+        // may be reached for: the owner put the phrase in the keyring and locked it, and answering
+        // that with a weaker copy — or with nothing, which means writing in the clear — is to
+        // answer a question nobody asked.
+        phraseFile().writeText("в файле")
+
+        val vault = PhraseVault(directory, keyring)
+
+        assertNull(vault.phrase())
+        assertTrue(vault.locked, "заперто, а сказано иначе")
+        assertEquals(PhraseKept.KEYRING, vault.where)
+        // And nothing was written over it.
+        assertEquals(0, keyring.writes)
+    }
+
+    @Test
+    fun anUnlockedKeyringIsNotLocked() {
+        val vault = PhraseVault(directory, Working().also { it.held = "sync early up" })
+
+        assertEquals("sync early up", vault.phrase())
+        assertFalse(vault.locked)
+    }
+
+    @Test
+    fun noKeyringAtAllIsNotLockedEither() {
+        // The difference that matters: a machine with no keyring has no phrase to be denied, so
+        // sync carries on in the clear exactly as it did before any of this existed.
+        val vault = PhraseVault(directory, Absent())
+
+        assertNull(vault.phrase())
+        assertFalse(vault.locked)
     }
 }

@@ -330,6 +330,16 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private val _syncPhrase = MutableStateFlow("")
 
+    /**
+     * Whether a phrase is kept on this machine that the app was not allowed to read.
+     *
+     * Held rather than guessed at each use, because what hangs on it is a refusal: while this is
+     * true no pass runs at all. See `PhraseVault.locked`, and the branch in `loadSettings` that
+     * sets it.
+     */
+    private val _phraseLocked = MutableStateFlow(false)
+    val phraseLocked: StateFlow<Boolean> = _phraseLocked.asStateFlow()
+
     /** The phrase in use and what was made from it, so a key is derived once and not per pass. */
     private var sealingInUse: Pair<String, Sealing>? = null
 
@@ -474,13 +484,24 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             // has left there. Moving it in happens once, and the settings keep it until the vault
             // has read it back.
             val kept = phrases.phrase()
-            _syncPhrase.value = kept ?: s.syncPhrase
-            if (kept == null && s.syncPhrase.isNotEmpty()) {
-                phrases.keep(s.syncPhrase)
-                println("Sync: the phrase now lives where this desktop keeps secrets: ${phrases.where}")
-                // Rewrites the settings without it, which is the moment the plain copy goes. Only
-                // ever after the vault has read the phrase back; see PhraseVault.keep.
-                if (phrases.where != PhraseKept.PLAIN) saveSettings()
+            if (phrases.locked) {
+                // A phrase is kept here and this process may not read it. Nothing below may run:
+                // the settings copy must not be written over the locked one, and sync must not
+                // carry on as though there were no phrase — writing in the clear is the one thing
+                // the owner asked this not to do. Sync waits instead; see [phraseLocked].
+                _syncPhrase.value = ""
+                _phraseLocked.value = true
+                println("Sync: the phrase is locked away, so sync waits rather than write in the clear")
+            } else {
+                _phraseLocked.value = false
+                _syncPhrase.value = kept ?: s.syncPhrase
+                if (kept == null && s.syncPhrase.isNotEmpty()) {
+                    phrases.keep(s.syncPhrase)
+                    println("Sync: the phrase now lives where this desktop keeps secrets: ${phrases.where}")
+                    // Rewrites the settings without it, which is the moment the plain copy goes.
+                    // Only ever after the vault has read the phrase back; see PhraseVault.keep.
+                    if (phrases.where != PhraseKept.PLAIN) saveSettings()
+                }
             }
             _syncDirect.value = s.syncDirect
             _syncPeerAddress.value = s.syncPeerAddress
@@ -1769,6 +1790,11 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         throttled: Boolean = false,
         allVectors: Boolean = false
     ) = withContext(Dispatchers.Default) {
+        // Held entirely while the phrase is locked away. Not a pass that writes less: a pass with
+        // no phrase writes the owner's listening in the clear into a folder they share, which is
+        // the opposite of what setting a phrase asked for. Playing music is untouched — the
+        // keyring guards the phrase and nothing else.
+        if (_phraseLocked.value) return@withContext false
         val coordinator = coordinator() ?: return@withContext false
         syncGate.withLock {
             // Before the readers: bring in whatever the other device has written since.

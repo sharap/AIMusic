@@ -50,8 +50,21 @@ actual class PhraseVault actual constructor(private val directory: File) {
     @Volatile
     private var remembered: String? = null
 
+    /**
+     * Whether a phrase is kept here that this process could not read.
+     *
+     * Its own answer, because "no phrase" and "a phrase I may not have" call for opposite
+     * behaviour from everything above: the first lets sync write in the clear, which is what a
+     * library with no phrase has always done, and the second must stop it. See [Keyring.Kept].
+     */
+    @Volatile
+    private var lockedAway = false
+
     /** Where the phrase is kept as things stand; meaningful after the first read or write. */
     actual val where: PhraseKept get() = held
+
+    /** True when there is a phrase here and the owner has not let this process read it. */
+    actual val locked: Boolean get() = lockedAway
 
     /**
      * The phrase, or null when the owner has not set one.
@@ -62,10 +75,23 @@ actual class PhraseVault actual constructor(private val directory: File) {
      */
     actual fun phrase(): String? {
         remembered?.let { return it.takeIf { text -> text.isNotEmpty() } }
-        keyring.read()?.let {
-            held = PhraseKept.KEYRING
-            remembered = it
-            return it
+        when (val kept = keyring.read()) {
+            is Keyring.Kept.Phrase -> {
+                held = PhraseKept.KEYRING
+                lockedAway = false
+                remembered = kept.text
+                return kept.text
+            }
+            Keyring.Kept.Locked -> {
+                // Said and then left alone: there is a phrase, it is not ours to read right now,
+                // and nothing below should be tried instead. Falling through to the file would
+                // answer a locked keyring with a weaker copy, and falling through to nothing would
+                // answer it by publishing in the clear.
+                held = PhraseKept.KEYRING
+                lockedAway = true
+                return null
+            }
+            Keyring.Kept.None -> lockedAway = false
         }
         val file = phraseFile()
         if (file.isFile) {
@@ -94,7 +120,7 @@ actual class PhraseVault actual constructor(private val directory: File) {
             // Read back before anything else is let go of: a keyring that accepts a secret and
             // then cannot give it back would mean a library that has quietly stopped being
             // readable by the other device.
-            if (keyring.read() == phrase) {
+            if ((keyring.read() as? Keyring.Kept.Phrase)?.text == phrase) {
                 held = PhraseKept.KEYRING
                 remembered = phrase
                 runCatching { phraseFile().delete() }

@@ -28,7 +28,18 @@ expect class PhraseVault(directory: File) {
     /** Where the phrase is kept as things stand; meaningful after the first read or write. */
     val where: PhraseKept
 
-    /** The phrase, or null when the owner has not set one. */
+    /**
+     * True when a phrase is kept here that this process was not allowed to read — a keyring the
+     * owner left locked, and a prompt they closed.
+     *
+     * Its own answer, and not folded into [phrase] returning null, because the two call for
+     * opposite behaviour. No phrase means the owner never set one, and sync then writes in the
+     * clear as it always has. Locked means they did set one, and writing in the clear would put
+     * into the folder exactly what they asked to have sealed.
+     */
+    val locked: Boolean
+
+    /** The phrase, or null when the owner has not set one — or when it is [locked]. */
     fun phrase(): String?
 
     /** Keeps it, or forgets it when given nothing. @return true when the keyring took it. */
