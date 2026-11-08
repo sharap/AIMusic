@@ -26,5 +26,17 @@ data class AppSettings(
      * Kept in this machine's own settings, which is a file no wider than its owner. See
      * `sync/Sealing`: what it protects is the folder, and the folder is often somewhere else.
      */
-    val syncPhrase: String = ""
+    val syncPhrase: String = "",
+    /**
+     * Whether this machine carries sync itself over the network instead of through a folder.
+     *
+     * One or the other, not both: the two transports carry the same records and each keeps its own
+     * note of how far every file was read, so running both would mean two of everything that
+     * remembers, for no gain.
+     */
+    val syncDirect: Boolean = false,
+    /**
+     * The other device's address, for a network that does not carry broadcasts. Host, or host:port.
+     */
+    val syncPeerAddress: String = ""
 )

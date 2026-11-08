@@ -4,8 +4,13 @@ import java.io.File
 import java.io.IOException
 
 /**
- * The sync folder as this machine reaches it: an ordinary directory the owner points at, which is
- * all a desktop needs and the whole of what Android goes through the storage access framework for.
+ * The sync folder as an ordinary directory.
+ *
+ * On the desktop that is the folder the owner points at. On Android it is the app's own private
+ * directory, which is what the socket transport uses: there is no shared folder to reach there at
+ * all, and the storage access framework was the whole reason reaching one was slow and fragile.
+ * The phone keeps `SafSyncFolder` beside this for a folder that Syncthing carries, and that one has
+ * no twin here, because reaching a document tree is a question only Android has.
  *
  * Everything lives under `aura/v1/<device id>/`, one directory per device, and a device writes only
  * its own. There is no locking and no leader because there is nothing to contend for.
@@ -19,9 +24,7 @@ import java.io.IOException
  * Reading still takes both shapes, because the device on the other side may be a phone whose
  * provider could not append.
  *
- * This one is not a copy. Most of this package is shared with the Android app line for line, and
- * this is the file that may not be: it is how *this* platform reaches a folder, and the phone's
- * answer to the same question is `SafSyncFolder`.
+ * The Android app carries a copy of this file. The two must match: see docs/SYNC-FORMAT.md.
  */
 class FileSyncFolder(
     /**

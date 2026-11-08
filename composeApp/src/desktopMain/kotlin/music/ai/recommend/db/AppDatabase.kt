@@ -277,6 +277,19 @@ class DesktopMusicDao(private val baseDir: File) : MusicDao {
         forceSave()
     }
 
+    override suspend fun offerEveryVectorAgain(): Int {
+        var offered = 0
+        synchronized(lock) {
+            for ((path, row) in cache.entries.toList()) {
+                if (row.refusedStamp != null) continue
+                offered++
+                if (row.publishedAt != 0L) cache[path] = row.copy(publishedAt = 0L)
+            }
+        }
+        forceSave()
+        return offered
+    }
+
     override suspend fun deleteEmbeddings(paths: List<String>) {
         if (paths.isEmpty()) return
         synchronized(lock) {

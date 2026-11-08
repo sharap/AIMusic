@@ -395,34 +395,133 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
+                    // What carries sync, which is the owner's choice: this app over the network,
+                    // or a folder something else keeps in step.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Shared folder", style = MaterialTheme.typography.titleMedium)
+                            Text("Straight over the network", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                syncSummary.folder ?: "Not set up",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                // What this is for, since a folder on its own explains nothing:
-                                // the two apps leave files for each other in it and never talk.
-                                "Listening history is exchanged through a folder something else " +
-                                    "keeps in step — Syncthing, a network share, a stick.",
+                                "This app carries sync itself, with no shared folder and no other " +
+                                    "program. Both devices need the same phrase; this machine " +
+                                    "listens for as long as it is running.",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
-                        Button(onClick = {
-                            val path = pickDirectory()
-                            if (path != null) viewModel.setSyncFolder(path)
-                        }) {
-                            Text(if (syncSummary.folder == null) "Choose" else "Change")
+                        Switch(
+                            checked = syncSummary.direct,
+                            onCheckedChange = { viewModel.enableDirectSync(it) }
+                        )
+                    }
+
+                    if (syncSummary.direct) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            if (syncSummary.listening) "Listening on port ${syncSummary.port}"
+                            else "Not listening",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (syncSummary.addresses.isNotEmpty()) {
+                            Text(
+                                "This machine: ${syncSummary.addresses.joinToString(", ")}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Text(
+                            if (syncSummary.peers.isEmpty()) "No other device heard yet"
+                            else "Found: ${syncSummary.peers.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        syncSummary.peerTrouble?.let { trouble ->
+                            Text(
+                                "Last attempt: $trouble",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        // Listening and never once reached is what a closed firewall looks like
+                        // from the inside, and it looks exactly like everything working.
+                        if (syncSummary.listening && syncSummary.served == 0) {
+                            Text(
+                                "Nothing has reached this machine yet. A firewall is the usual " +
+                                    "reason — Fedora's default zone allows ssh and mDNS and " +
+                                    "nothing else, so neither the beacon nor a connection gets " +
+                                    "in. Either open the two ports:\n" +
+                                    "sudo firewall-cmd --add-port=${syncSummary.port}/tcp " +
+                                    "--add-port=54334/udp --permanent && sudo firewall-cmd --reload\n" +
+                                    "or type the phone's address above — this machine dials out " +
+                                    "either way, and outgoing is not blocked.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        var address by remember { mutableStateOf("") }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = address,
+                                onValueChange = { address = it },
+                                label = { Text("Address of the other device") },
+                                placeholder = { Text("only where broadcasts do not arrive") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    viewModel.setPeerAddress(address)
+                                    address = ""
+                                },
+                                enabled = address.isNotBlank()
+                            ) {
+                                Text("Save")
+                            }
+                        }
+                        if (syncSummary.peerAddressInUse.isNotEmpty()) {
+                            Text(
+                                "Dialling ${syncSummary.peerAddressInUse} as well as whoever answers.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider(modifier = Modifier.graphicsLayer { alpha = 0.1f })
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+
+                    if (!syncSummary.direct) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Shared folder", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    syncSummary.folder ?: "Not set up",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    // What this is for, since a folder on its own explains nothing:
+                                    // the two apps leave files for each other in it and never talk.
+                                    "Listening history is exchanged through a folder something else " +
+                                        "keeps in step — Syncthing, a network share, a stick.",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Button(onClick = {
+                                val path = pickDirectory()
+                                if (path != null) viewModel.setSyncFolder(path)
+                            }) {
+                                Text(if (syncSummary.folder == null) "Choose" else "Change")
+                            }
                         }
                     }
 
-                    if (syncSummary.folder != null) {
+                    // Everything below is about what travels rather than about how, so it is
+                    // shown for either transport.
+                    if (syncSummary.folder != null || syncSummary.direct) {
                         Spacer(modifier = Modifier.height(16.dp))
                         HorizontalDivider(modifier = Modifier.graphicsLayer { alpha = 0.1f })
                         Spacer(modifier = Modifier.height(16.dp))
@@ -540,7 +639,7 @@ fun SettingsScreen(viewModel: MusicViewModel) {
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
-                        TextButton(onClick = { viewModel.forgetSyncFolder() }) {
+                        if (!syncSummary.direct) TextButton(onClick = { viewModel.forgetSyncFolder() }) {
                             Text("Forget this folder", color = MaterialTheme.colorScheme.error)
                         }
                     }

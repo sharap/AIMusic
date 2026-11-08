@@ -5,7 +5,9 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +36,9 @@ import music.ai.recommend.ai.SmartAlbum
 import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
+import music.ai.recommend.sync.DirectoryPeerFiles
+import music.ai.recommend.sync.PeerFiles
+import music.ai.recommend.sync.PeerTransport
 import music.ai.recommend.sync.DaoVectorStore
 import music.ai.recommend.sync.GcmSealing
 import music.ai.recommend.sync.M3uShelf
@@ -278,7 +283,25 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         /** Listens about tracks this library has not got yet; they wait rather than being lost. */
         val waiting: Int = 0,
         val busy: Boolean = false,
-        val lastRunAt: Long = 0L
+        val lastRunAt: Long = 0L,
+        /** Whether this machine carries sync itself over the network instead of through a folder. */
+        val direct: Boolean = false,
+        /** Whether the listener is up, and on which port; see [PeerTransport]. */
+        val listening: Boolean = false,
+        val port: Int = -1,
+        /** This machine's addresses, to type on the phone where broadcasts do not arrive. */
+        val addresses: List<String> = emptyList(),
+        /** Devices heard announcing themselves: the first eight characters of each id, and where. */
+        val peers: List<String> = emptyList(),
+        /** Why the listener is not up, or what the last conversation stumbled on. */
+        val peerTrouble: String? = null,
+        /** The address the owner typed, if any: dialled as well as whoever answers a beacon. */
+        val peerAddressInUse: String = "",
+        /**
+         * How many conversations this machine has answered. Zero while listening is the signature
+         * of a firewall, which is the one failure that looks like success from the inside.
+         */
+        val served: Int = 0
     )
 
     private val _syncSummary = MutableStateFlow(SyncSummary())
@@ -286,6 +309,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     private val _syncFolderPath = MutableStateFlow("")
     val syncFolderPath: StateFlow<String> = _syncFolderPath.asStateFlow()
+
+    private val _syncDirect = MutableStateFlow(false)
+    val syncDirect: StateFlow<Boolean> = _syncDirect.asStateFlow()
+
+    private val _syncPeerAddress = MutableStateFlow("")
+    val syncPeerAddress: StateFlow<String> = _syncPeerAddress.asStateFlow()
 
     private val _syncPhrase = MutableStateFlow("")
 
@@ -329,6 +358,17 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     /** One pass over the folder at a time; see [syncPass]. */
     private val syncGate = Mutex()
+
+    /** Dials the other device on a timer while the network transport is on; see startPeerPolling. */
+    private var peerPollJob: Job? = null
+
+    /**
+     * How often this machine dials the other while the network transport is on.
+     *
+     * Half a minute: a beacon stays fresh for one, so this also keeps this machine findable, and it
+     * is the cadence at which a listen made on one device shows up on the other.
+     */
+    private val PEER_POLL_MS = 30_000L
 
     /** The wait after a playlist change before it is sent; see [settlePlaylists]. */
     private var playlistSettling: kotlinx.coroutines.Job? = null
@@ -378,8 +418,16 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         
         observeSync()
 
-        // Start loading sequence
-        viewModelScope.launch {
+        // Start loading sequence.
+        //
+        // On the plain Main dispatcher and not the scope's own, which is Main.immediate: launched
+        // from the event thread, that one runs the body on the spot rather than posting it, so the
+        // whole sequence would execute *inside* this constructor — before the property initialisers
+        // below this block have run. Every `by lazy` declared further down is then a null delegate,
+        // and reading one throws. It did: startPeerListener touched peerTransport, the throw took
+        // the sequence with it, and neither the library nor the analysis was ever loaded, so the
+        // window came up with nothing in it at all. Posting it means the constructor finishes first.
+        viewModelScope.launch(Dispatchers.Main) {
             loadAllPersistedDataSync() // 1. Load settings first
             loadMusic().join()         // 2. Wait for scan to finish with correct path
             loadScannedIds()           // 3. Then load AI state
@@ -398,6 +446,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             _volumePercent.value = s.volumePercent.coerceIn(0, 100)
             _syncFolderPath.value = s.syncFolderPath
             _syncPhrase.value = s.syncPhrase
+            _syncDirect.value = s.syncDirect
+            _syncPeerAddress.value = s.syncPeerAddress
+            // Whatever was built while these were at their defaults is not about this machine's
+            // actual destination; the next pass builds one that is.
+            syncCoordinator = null
+            // Nothing happens here unless the owner asked for it; see startPeerListener.
+            startPeerListener()
             _syncSummary.value = _syncSummary.value.copy(sealed = s.syncPhrase.isNotEmpty())
             player.volumePercent = _volumePercent.value
             _smartAlbumsEpsScale.value = s.smartAlbumsEpsScale.coerceIn(
@@ -432,7 +487,9 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 smartAlbumsEpsScale = _smartAlbumsEpsScale.value,
                 volumePercent = _volumePercent.value,
                 syncFolderPath = _syncFolderPath.value,
-                syncPhrase = _syncPhrase.value
+                syncPhrase = _syncPhrase.value,
+                syncDirect = _syncDirect.value,
+                syncPeerAddress = _syncPeerAddress.value
             )
             db.musicDao().saveSettings(settings)
         }
@@ -1313,11 +1370,53 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
 
     // ---------------------------------------------------------------------------- sync
 
+    /**
+     * Where the socket transport keeps everything: this machine's own day files and its copies of
+     * the other devices'. Beside the database rather than in a folder somebody else sweeps.
+     */
+    private val localSyncRoot by lazy { java.io.File(syncDirectory, "folder") }
+
+    /** The byte view of [localSyncRoot] the socket transport works through. */
+    private fun peerFiles(): PeerFiles? {
+        val deviceId = syncDeviceId() ?: return null
+        return DirectoryPeerFiles(java.io.File(localSyncRoot, "aura/v1"), deviceId)
+    }
+
+    /** The listener, the beacon and one exchange per pass; null until this machine has an id. */
+    private val peerTransport: PeerTransport? by lazy {
+        syncDeviceId()?.let { id ->
+            PeerTransport(id, { peerFiles() }, { line -> println("Peer: $line") })
+        }
+    }
+
+    /**
+     * Where this machine's records go, as the state names it; see [SyncState.transport].
+     *
+     * Null when there is nowhere: no folder chosen and the network transport off. Which is also
+     * what this machine looks like *before its settings have been read* — `init` starts watching
+     * for listens before the settings arrive, so a pass can happen while every one of them is
+     * still at its default. A destination of "a folder with no path" was written down once by
+     * exactly that, and because the coordinator is cached it then synced into nowhere for the whole
+     * run. Null is the honest answer, and it builds no coordinator at all.
+     *
+     * The folder is named and not merely called "a folder", so that choosing a *different* folder
+     * counts as a change: it is an empty destination whose files share the old one's names, which
+     * is the same situation as switching transports and was invisible while this said "folder".
+     */
+    private fun destination(): String? =
+        SyncState.destinationOf(direct = _syncDirect.value, folder = _syncFolderPath.value)
+
     /** The folder itself, rebuilt whenever the choice changes and null until one is made. */
     private fun syncFolder(): SyncFolder? {
+        val deviceId = syncDeviceId() ?: return null
+        if (_syncDirect.value) {
+            return FileSyncFolder(
+                { localSyncRoot.also { if (!it.isDirectory) it.mkdirs() } },
+                deviceId
+            )
+        }
         val path = _syncFolderPath.value
         if (path.isEmpty()) return null
-        val deviceId = syncDeviceId() ?: return null
         // Looked up afresh on every pass: a folder on a drive that has been unplugged, or that
         // Syncthing has not recreated yet, is a null rather than a handle that means nothing.
         return FileSyncFolder({ java.io.File(path).takeIf { it.isDirectory } }, deviceId)
@@ -1329,7 +1428,32 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
     private fun coordinator(): SyncCoordinator<String>? {
         syncCoordinator?.let { return it }
         val deviceId = syncDeviceId() ?: return null
+        // Nowhere to send and nowhere to read: no coordinator, and nothing written down about a
+        // destination this machine has not got — above all not before the settings have loaded.
+        val transport = destination() ?: return null
         val state = SyncState.load(java.io.File(syncDirectory, "state.json"))
+        // The two transports have folders of their own whose files carry the same relative paths,
+        // so progress made through one says nothing about the other — and believing it would step
+        // over everything the other device has written. See SyncState.transport.
+        if (state.transport != transport) {
+            if (state.transport != null) {
+                println("Sync: records now go to $transport; reading it again from the top")
+            }
+            state.startOutboxAgain()
+            state.transport = transport
+            state.save()
+        }
+        // A destination that has never had this machine's vectors gets them once. Not on every
+        // change — eleven megabytes for this library — but a folder that never receives them can
+        // never hand them back, which is most of what a folder is for.
+        if (state.fillVectorsFor(transport)) {
+            viewModelScope.launch {
+                val waiting = db.musicDao().offerEveryVectorAgain()
+                println("Sync: vectors have not been to $transport yet: offering $waiting again")
+                state.save()
+                syncPass(force = true, takeIn = false, allVectors = true)
+            }
+        }
         return SyncCoordinator(
             deviceId = deviceId,
             state = state,
@@ -1404,7 +1528,7 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             foreground.collectLatest { inFront ->
                 while (inFront) {
                     delay(FOREGROUND_POLL_MS)
-                    syncPass(force = false, takeIn = true)
+                    drainPasses()
                 }
             }
         }
@@ -1433,8 +1557,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         throttled: Boolean = false,
         allVectors: Boolean = false
     ) = withContext(Dispatchers.Default) {
-        val coordinator = coordinator() ?: return@withContext
+        val coordinator = coordinator() ?: return@withContext false
         syncGate.withLock {
+            // Before the readers: bring in whatever the other device has written since.
+            if (takeIn) peerExchange()
             val now = nowMs()
             val sent = runCatching { coordinator.push(now, force).written }
                 .getOrElse { println("Sync: could not write the history out: $it"); 0 }
@@ -1452,7 +1578,13 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             // Vectors on the same moments as a full pass, and never on a finished listen: there is
             // nothing new to publish then, and reading a library's worth of them would be work for
             // nothing. In the steady state this costs one empty query.
-            val sentVectors = if (pulled == null) null else
+            //
+            // A pass asked for every vector is such a moment by itself, even when it takes nothing
+            // in. The first pass to a new destination is exactly that — hand it the library, and do
+            // not read a folder that has only just been named — and gating it on having read
+            // something first made it a pass that published no vectors at all, which was the whole
+            // of what it was for. Found by a phone whose analysis the desktop could not hand back.
+            val sentVectors = if (pulled == null && !allVectors) null else
                 runCatching {
                     // Without a limit when it is not the end of an analysis, so the coordinator's
                     // own choice stands.
@@ -1530,6 +1662,10 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
                 if (it.written > 0) println("Sync: daily mix out: ${it.day}, attempt ${it.attempt}")
             }
 
+            // After the writers: hand over what this pass produced, rather than leaving it here
+            // until the next one. Nothing to do when the folder transport is in use.
+            peerExchange()
+
             _syncSummary.value = _syncSummary.value.let {
                 it.copy(
                     // Totals since this run started, not of the last pass: most passes happen on
@@ -1556,7 +1692,129 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             if ((tookVectors?.takenIn ?: 0) > 0) {
                 loadScannedIds()
             }
+            // True when a reader stopped short of the end: it takes in only so much at a time
+            // and says so. Whoever drives the passes can then come straight back instead of
+            // waiting for the next arrival — see [drainPasses].
+            //
+            // It has to have got through something as well. A pass that reports more and sees
+            // nothing must not become a loop.
+            tookVectors?.let { it.more && it.takenIn + it.alreadyHeld + it.unmatched > 0 } == true
         }
+    }
+
+    /**
+     * Turns the network transport on or off. The coordinator is dropped: the folder it was built
+     * around has changed, and the next pass builds one against the new one.
+     */
+    fun enableDirectSync(on: Boolean) {
+        if (_syncDirect.value == on) return
+        _syncDirect.value = on
+        syncCoordinator = null
+        saveSettings()
+        if (on) startPeerListener() else {
+            peerPollJob?.cancel()
+            peerTransport?.stop()
+        }
+        viewModelScope.launch { syncPass(force = true, takeIn = true) }
+    }
+
+    /** The address of the other device, for a network where broadcasts do not arrive. */
+    fun setPeerAddress(text: String) {
+        _syncPeerAddress.value = text.trim()
+        saveSettings()
+        viewModelScope.launch { syncPass(force = true, takeIn = true) }
+    }
+
+    /**
+     * Starts listening, if the owner asked for the network transport.
+     *
+     * A desktop listens for as long as it is running, which is what makes the common pair work
+     * without a background service on the phone: the phone dials whenever it is awake.
+     */
+    private fun startPeerListener() {
+        if (!_syncDirect.value) return
+        val transport = peerTransport ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            transport.setPhrase(_syncPhrase.value)
+            if (!transport.start()) println("Peer: could not listen for the other device")
+            refreshTransportSummary()
+        }
+        startPeerPolling()
+    }
+
+    /**
+     * One exchange with whoever is reachable.
+     *
+     * Called twice in a pass on purpose: once before the readers run, so they see what the other
+     * device has written, and once after the writers, so what this pass produced does not sit here
+     * until the next one.
+     */
+    private suspend fun peerExchange(): Boolean = withContext(Dispatchers.IO) {
+        if (!_syncDirect.value) return@withContext false
+        val transport = peerTransport ?: return@withContext false
+        transport.setPhrase(_syncPhrase.value)
+        if (!transport.state.listening) transport.start()
+        val outcomes = runCatching { transport.exchange(_syncPeerAddress.value) }
+            .onFailure { println("Peer: could not talk to the other device: ${it.message}") }
+            .getOrDefault(emptyList())
+        refreshTransportSummary()
+        outcomes.any { it.moved }
+    }
+
+    /**
+     * Dials the other device every so often while the network transport is on.
+     *
+     * Needed because reachability is often one-way: this machine's own firewall may let it dial a
+     * phone perfectly well while refusing to be dialled or even to hear a beacon, so whichever side
+     * *can* reach the other has to try on its own rather than waiting to be called.
+     */
+    private fun startPeerPolling() {
+        peerPollJob?.cancel()
+        peerPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(PEER_POLL_MS)
+                if (!_syncDirect.value) continue
+                // A full pass when something arrived — reading the folder for nothing is the
+                // expensive half — or when the last pass said it had stopped short, since then
+                // what is left to read is already here and nothing else will come to fetch it.
+                if (peerExchange() || _syncSummary.value.vectorsWaiting) drainPasses()
+            }
+        }
+    }
+
+    /**
+     * Passes until nothing is left waiting.
+     *
+     * A reader takes in only so much at a time and says when it stopped short, and leaving the
+     * rest for the next pass is right as long as passes keep coming. The pass that *brought* the
+     * file is often the last one for a while, though: nothing more arrives, so nothing more is
+     * read, and the device sits on a complete file with part of it unread. Found exactly that way
+     * — a phone holding all seventeen megabytes of the desktop's vectors with sixty of the
+     * ninety-one batches read, and no reason left to look at the rest.
+     *
+     * Bounded, and only while the passes are getting through it.
+     */
+    private suspend fun drainPasses(limit: Int = 500) {
+        var passes = 0
+        while (passes++ < limit && syncPass(force = false, takeIn = true)) { /* more waiting */ }
+    }
+
+    /** Puts what the transport is doing into the summary the settings screen reads. */
+    private fun refreshTransportSummary() {
+        val state = peerTransport?.state
+        val direct = _syncDirect.value
+        _syncSummary.value = _syncSummary.value.copy(
+            direct = direct,
+            listening = direct && state?.listening == true,
+            port = state?.port ?: -1,
+            addresses = if (direct) state?.addresses.orEmpty() else emptyList(),
+            peers = if (!direct) emptyList() else state?.peers.orEmpty().map {
+                "${it.deviceId.take(8)} · ${it.address}"
+            },
+            peerTrouble = if (!direct) null else state?.trouble ?: state?.last?.trouble,
+            peerAddressInUse = if (direct) _syncPeerAddress.value else "",
+            served = state?.served ?: 0
+        )
     }
 
     /** Takes the folder the owner picked. */

@@ -53,6 +53,18 @@ interface MusicDao {
     suspend fun markVectorsPublished(paths: List<String>, at: Long)
 
     /**
+     * Offers every vector to the other devices again.
+     *
+     * Run when this machine's records start going somewhere they have never been — a folder just
+     * chosen, or the socket's own directory the first time it is used. The marks say "already
+     * offered", which was true of the *previous* destination and says nothing about this one, and a
+     * destination that never receives them can never hand them back.
+     *
+     * @return how many will now go out.
+     */
+    suspend fun offerEveryVectorAgain(): Int
+
+    /**
      * True when embeddings from an older analysis had to be thrown away on startup.
      *
      * The settings screen says so, because otherwise the library would appear to have
