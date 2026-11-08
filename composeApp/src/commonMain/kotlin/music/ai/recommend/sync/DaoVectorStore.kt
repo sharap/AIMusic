@@ -69,6 +69,15 @@ class DaoVectorStore(
     override suspend fun analysed(): Set<String> =
         dao.getAllEmbeddings().mapTo(HashSet()) { it.path }
 
+    override suspend fun held(tracks: List<String>): List<VectorStore.Held<String>> {
+        if (tracks.isEmpty()) return emptyList()
+        // The whole table is already a map in memory, so this is a few lookups rather than a query.
+        val wanted = tracks.toHashSet()
+        return dao.getAllEmbeddings()
+            .filter { it.path in wanted && it.vector.isNotEmpty() }
+            .map { row -> VectorStore.Held(row.path, FloatArray(row.vector.size) { row.vector[it] }) }
+    }
+
     override suspend fun takeIn(vectors: List<VectorStore.Held<String>>): Int =
         dao.insertEmbeddings(vectors.map { held ->
             EmbeddingEntity(

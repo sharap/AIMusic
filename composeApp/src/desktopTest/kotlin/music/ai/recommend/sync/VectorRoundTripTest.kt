@@ -135,6 +135,61 @@ class VectorRoundTripTest {
     }
 
     @Test
+    fun aVectorAskedForByNameArrivesAndTheFolderStaysEmpty() = runBlocking {
+        // What the asking machine is missing, said before anything here is analysed: all of it.
+        val wanted = coordinator(second).vectorsWanted(50)
+        assertEquals(3, wanted.size, "просит: $wanted")
+
+        analysed(0, 1)
+        val giver = coordinator(first)
+        assertEquals(2, giver.vectorsHeld())
+        // The ogg: in the library, no vector, and no shared decoder either — still a gap.
+        assertEquals(1, giver.vectorsLacking())
+
+        val served = giver.serveVectors(wanted)
+        // Two of the three asked for. The third is held by nobody, and a key that names nothing
+        // here is left out rather than answered with an excuse.
+        assertEquals(2, served.size, "подано: $served")
+
+        // As the other machine: the same library, none of it analysed.
+        dao.clearAllEmbeddings()
+        assertEquals(2, coordinator(second).takeInVectors(served), "принято")
+
+        val held = dao.getAllEmbeddings().associateBy { it.path }
+        assertEquals(setOf(tracks[0].path, tracks[1].path), held.keys)
+        for (index in 0..1) {
+            assertEquals(
+                vector(index).toList(),
+                held.getValue(tracks[index].path).vector,
+                "вектор ${tracks[index].path}"
+            )
+        }
+
+        // Nothing was published to do it, which is the whole point: a socket has somebody to ask.
+        assertTrue(
+            FileSyncFolder(folder, first).files(first, VectorWriter.DIRECTORY).isEmpty(),
+            "по сети по запросу — в папку писать нечего"
+        )
+        // And what arrived this way is still unoffered, so an owner who switches to a folder
+        // tomorrow hands it on exactly as if it had been analysed here.
+        assertEquals(2, coordinator(second).pushVectors(now).written)
+    }
+
+    @Test
+    fun askingForNothingIsAnsweredWithNothing() = runBlocking {
+        analysed(0, 1)
+        val giver = coordinator(first)
+        assertTrue(giver.serveVectors(emptyList()).isEmpty())
+        assertEquals(0, giver.takeInVectors(emptyList()))
+        // One gap left here — the ogg — and it is named rather than counted, because the name is
+        // what the other machine has to look it up by.
+        val wanted = giver.vectorsWanted(50)
+        assertEquals(1, wanted.size, "просит: $wanted")
+        // Lower-cased, as every key is: the one spelling both devices can agree on.
+        assertTrue(wanted.single().contains("atlantia"), "ключ: ${wanted.single()}")
+    }
+
+    @Test
     fun aVectorFromAFormatWithoutASharedDecoderNeverLeaves() = runBlocking {
         analysed(2)                            // the ogg
         val pushed = coordinator(first).pushVectors(now)

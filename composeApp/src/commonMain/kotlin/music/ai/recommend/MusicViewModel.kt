@@ -37,6 +37,7 @@ import music.ai.recommend.ai.SmartAlbumClustering
 import music.ai.recommend.db.getAppDatabase
 import music.ai.recommend.sync.FileSyncFolder
 import music.ai.recommend.sync.DirectoryPeerFiles
+import music.ai.recommend.sync.PeerClient
 import music.ai.recommend.sync.PeerFiles
 import music.ai.recommend.sync.PeerTransport
 import music.ai.recommend.sync.DaoVectorStore
@@ -51,6 +52,8 @@ import music.ai.recommend.sync.SyncCoordinator
 import music.ai.recommend.sync.SyncFolder
 import music.ai.recommend.sync.SyncIdentity
 import music.ai.recommend.sync.SyncState
+import music.ai.recommend.sync.VectorCourier
+import music.ai.recommend.sync.VectorWriter
 import kotlinx.coroutines.withContext
 import aimusic.composeapp.generated.resources.Res
 
@@ -1382,10 +1385,25 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         return DirectoryPeerFiles(java.io.File(localSyncRoot, "aura/v1"), deviceId)
     }
 
+    /**
+     * This machine's vectors as a peer may ask for them.
+     *
+     * Over the cached coordinator and never one built here: this is called from whatever thread a
+     * peer's conversation is on, and building a coordinator — loading state, starting outboxes —
+     * from inside somebody else's phone call is not a thing to do. Until this machine has one of
+     * its own, the honest answer to a peer is that there is nothing here.
+     */
+    private val vectorCourier = VectorCourier { syncCoordinator }
+
     /** The listener, the beacon and one exchange per pass; null until this machine has an id. */
     private val peerTransport: PeerTransport? by lazy {
         syncDeviceId()?.let { id ->
-            PeerTransport(id, { peerFiles() }, { line -> println("Peer: $line") })
+            PeerTransport(
+                deviceId = id,
+                files = { peerFiles() },
+                records = { vectorCourier },
+                note = { line -> println("Peer: $line") }
+            )
         }
     }
 
@@ -1443,10 +1461,16 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             state.transport = transport
             state.save()
         }
-        // A destination that has never had this machine's vectors gets them once. Not on every
-        // change — eleven megabytes for this library — but a folder that never receives them can
-        // never hand them back, which is most of what a folder is for.
-        if (state.fillVectorsFor(transport)) {
+        // A folder that has never had this machine's vectors gets them once. Not on every change —
+        // eleven megabytes for this library — but a folder that never receives them can never hand
+        // them back, which is most of what a folder is for.
+        //
+        // A socket needs none of that. There is somebody on the other end to ask, so a device says
+        // which tracks it is missing and is served those by name, and the copy a folder has to hold
+        // is held instead by the peer's own store. See [PeerRecords].
+        if (transport == SyncState.DIRECT) {
+            dropPublishedVectors(state)
+        } else if (state.fillVectorsFor(transport)) {
             viewModelScope.launch {
                 val waiting = db.musicDao().offerEveryVectorAgain()
                 println("Sync: vectors have not been to $transport yet: offering $waiting again")
@@ -1584,7 +1608,12 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
             // not read a folder that has only just been named — and gating it on having read
             // something first made it a pass that published no vectors at all, which was the whole
             // of what it was for. Found by a phone whose analysis the desktop could not hand back.
-            val sentVectors = if (pulled == null && !allVectors) null else
+            // Nothing is published to a socket: a peer asks for the tracks it is missing and is
+            // served them by name, so a library's worth written into a day file is seventeen
+            // megabytes nobody will ever fetch. Measured before this was true: a phone whose
+            // analysis had been cleared three times had written 59 197 708 bytes of vectors for a
+            // desktop that held every one of them already.
+            val sentVectors = if (_syncDirect.value || (pulled == null && !allVectors)) null else
                 runCatching {
                     // Without a limit when it is not the end of an analysis, so the coordinator's
                     // own choice stands.
@@ -1757,8 +1786,64 @@ class MusicViewModel : ViewModel(), PlaybackRemote {
         val outcomes = runCatching { transport.exchange(_syncPeerAddress.value) }
             .onFailure { println("Peer: could not talk to the other device: ${it.message}") }
             .getOrDefault(emptyList())
+        noticeVectorsTraded(outcomes)
         refreshTransportSummary()
         outcomes.any { it.moved }
+    }
+
+    /**
+     * Puts the vectors a conversation moved into the card, and rebuilds what they change.
+     *
+     * Over a socket they no longer arrive inside a batch, so the pass that used to notice them
+     * never sees them. Without this the card would say nothing was taken in while the analysis of
+     * a whole library arrived.
+     */
+    private fun noticeVectorsTraded(outcomes: List<PeerClient.Outcome>) {
+        val asked = outcomes.sumOf { it.vectorsTaken }
+        val served = outcomes.sumOf { it.vectorsGiven }
+        if (asked == 0 && served == 0) return
+        println("Sync: vectors by name: $asked taken in, $served handed over")
+        _syncSummary.value = _syncSummary.value.let {
+            it.copy(
+                vectorsTakenIn = it.vectorsTakenIn + asked,
+                vectorsSent = it.vectorsSent + served
+            )
+        }
+        // Tracks that have become analysed without being scanned, which is what the smart albums
+        // and the playlist of the day are built from.
+        if (asked > 0) loadScannedIds()
+    }
+
+    /**
+     * Removes the vectors files of a socket's directory tree, this machine's own and the copies
+     * taken from a peer.
+     *
+     * They are a cache for a fetch that will not happen: over a socket a peer asks by name. Left
+     * where they are they would be served for ever to a peer that has to download them to find out
+     * it holds every one — which is what they were. The progress through them goes with them, since
+     * a line count against a file that is gone is a claim about nothing.
+     */
+    private fun dropPublishedVectors(state: SyncState) {
+        val root = java.io.File(localSyncRoot, "aura/v1")
+        var removed = 0
+        var bytes = 0L
+        for (device in root.listFiles().orEmpty()) {
+            val vectors = java.io.File(device, VectorWriter.DIRECTORY)
+            if (!vectors.isDirectory) continue
+            for (file in vectors.listFiles().orEmpty()) {
+                val size = file.length()
+                if (file.delete()) {
+                    removed++
+                    bytes += size
+                }
+            }
+            vectors.delete()
+        }
+        val forgotten = state.forgetVectorProgress()
+        if (removed > 0 || forgotten) {
+            state.save()
+            println("Sync: vectors travel by name now: dropped $removed published file(s), $bytes bytes")
+        }
     }
 
     /**
