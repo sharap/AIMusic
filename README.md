@@ -1,5 +1,22 @@
 # AiMusic
 
+> **This port now lives in [sharap/auraai](https://github.com/sharap/auraai), under `desktop/`.**
+> The two code bases were merged on 2026-11-21 and this repository is no longer where the desktop
+> player is developed.
+>
+> The history came along: the merge kept both, so every commit here — up to and including
+> `9606735` — is in that repository with its own hash, and `git log --follow`, `git blame` and
+> `git bisect` still find it there. Nothing was copied and nothing was flattened.
+>
+> Why: the sync format, the decoders and the analysis existed twice, once per repository — 9091
+> lines kept in step by hand, with a script to check they had not drifted. Six files had drifted
+> anyway, because nothing fails when two copies disagree. There is one copy now, in a `:shared`
+> module both ports compile against, and the agreement is the compiler's job rather than
+> somebody's attention.
+>
+> What is here still builds, and is kept for the record. Changes, issues and pull requests belong
+> in the other repository.
+
 A local music player for the desktop that finds tracks by what they sound like, not only by what
 their tags say. It is a Compose Multiplatform port of [Aura AI](https://github.com/sharap/auraai.git), the Android
 app; the AI pipeline is the same, the platform layer is not.
